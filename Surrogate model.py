@@ -74,7 +74,7 @@ class Net(nn.Module):
 
         # prediction for training and validation set
         #x_train = x_train.unsqueeze(0)
-        #y_train = y_train.unsqueeze(0)
+        y_train = y_train.unsqueeze(1)
         output_train = net(x_train, [t1, t2])
         #output_val = net(x_val)
 
