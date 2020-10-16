@@ -1,7 +1,8 @@
+import cv2 as cv
 import numpy as np
 from numpy import random as r
-import cv2 as cv
 import matplotlib.pyplot as plt
+from collections import OrderedDict
 from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
@@ -11,14 +12,85 @@ import torchvision as tv
 import gc
 from torchvision import transforms as tf
 from torch.utils.data import Dataset, DataLoader
+from functools import partial
 
 ### temporary ###
 import os  # instead conda install nomkl
-
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
-
 ### temporary ###
+
+
+class Conv2dAutoPad(nn.Conv2d):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.padding = (self.kernel_size[0] // 2, self.kernel_size[1] // 2)
+
+
+convAuto = partial(Conv2dAutoPad, kernel_size=3, bias=False)
+
+
+def conv_bn(in_channels, out_channels, conv, *args, **kwargs):
+    return nn.Sequential(OrderedDict({  'conv': conv(in_channels, out_channels, *args, **kwargs),
+                                        'bn': nn.BatchNorm2d(out_channels)
+                                      }))
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, expansion=4, downsampling=1, conv=convAuto, *args, **kwargs):
+        super().__init__()
+
+        self.in_channels, self.out_channels, self.expansion, self.downsampling, self.conv \
+            = in_channels, out_channels, expansion, downsampling, conv
+
+        self.blocks = self.blocks = nn.Sequential(
+           conv_bn(self.in_channels, self.out_channels, self.conv, kernel_size=1),
+             nn.ReLU(inplace=True),
+             conv_bn(self.out_channels, self.out_channels, self.conv, kernel_size=3, stride=self.downsampling),
+             nn.ReLU(inplace=True),
+             conv_bn(self.out_channels, self.expanded_channels, self.conv, kernel_size=1),
+        )
+
+        self.shortcut = nn.Sequential(OrderedDict(
+            {   'conv': nn.Conv2d(self.in_channels, self.expanded_channels, kernel_size=1,
+                                  stride=self.downsampling, bias=False),
+                'bn': nn.BatchNorm2d(self.expanded_channels)
+            })) if self.should_apply_shortcut else None
+
+    def forward(self, x):
+        residual = x
+        if self.should_apply_shortcut: residual = self.shortcut(x)
+        x = self.blocks(x)
+        x += residual
+        return x
+
+    @property
+    def expanded_channels(self):
+        return self.out_channels * self.expansion
+
+    @property
+    def should_apply_shortcut(self):
+        return self.in_channels != self.expanded_channels
+
+
+class ResNetLayer(nn.Module):
+    def __init__(self, in_channels, out_channels, block=ResidualBlock, n=1, *args, **kwargs):
+        super().__init__()
+        downsampling = 2 if in_channels != out_channels else 1
+
+        self.blocks = nn.Sequential(
+            block(in_channels, out_channels, *args, **kwargs, downsampling=downsampling),
+            *[block(out_channels * block.expansion,
+                    out_channels, downsampling=1, *args, **kwargs) for _ in range(n - 1)]
+        )
+
+    def forward(self, x):
+        return self.blocks(x)
+
+
+print(conv_bn(3, 3, nn.Conv2d, kernel_size=3))
+print(ResidualBlock(32, 64))
+print(ResNetLayer(64, 128, n=3))
+
 
 class Net(nn.Module):
     def __init__(self):
@@ -153,8 +225,8 @@ criterion = criterion.cuda()
 # training process, loops through epoch (and batch or data-entries)
 for epoch in range(n_epochs):
     for i, batch in enumerate(data_loader):
-        if i % 100 == 0:
-            print('Batch : ', i + 1, '\t')
+        #if i % 100 == 0:
+        #    print('Batch : ', i + 1, '\t')
         X, y = batch
         output = net.train(epoch)
     if epoch % 2 == 0:
