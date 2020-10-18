@@ -13,6 +13,7 @@ import gc
 from torchvision import transforms as tf
 from torch.utils.data import Dataset, DataLoader
 from functools import partial
+from torchsummary import summary
 
 ### temporary ###
 import os  # instead conda install nomkl
@@ -23,9 +24,10 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 class Conv2dAutoPad(nn.Conv2d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # auto padding, here kernelsize / 2
         self.padding = (self.kernel_size[0] // 2, self.kernel_size[1] // 2)
 
-
+# create convolution layer with auto padding
 convAuto = partial(Conv2dAutoPad, kernel_size=3, bias=False)
 
 
@@ -77,9 +79,10 @@ class ResNetLayer(nn.Module):
         super().__init__()
         downsampling = 2 if in_channels != out_channels else 1
 
+        b1 = block(in_channels, out_channels, *args, **kwargs, downsampling=downsampling)
         self.blocks = nn.Sequential(
-            block(in_channels, out_channels, *args, **kwargs, downsampling=downsampling),
-            *[block(out_channels * block.expansion,
+            b1,
+            *[block(b1.expanded_channels,
                     out_channels, downsampling=1, *args, **kwargs) for _ in range(n - 1)]
         )
 
@@ -87,9 +90,14 @@ class ResNetLayer(nn.Module):
         return self.blocks(x)
 
 
-print(conv_bn(3, 3, nn.Conv2d, kernel_size=3))
-print(ResidualBlock(32, 64))
-print(ResNetLayer(64, 128, n=3))
+#print(conv_bn(3, 3, nn.Conv2d, kernel_size=3))
+#print(ResidualBlock(32, 64))
+
+
+#dummy = torch.ones((1, 64, 48, 48))
+#blo = ResNetLayer(64, 64, n=3, expansion=1)
+#print(blo(dummy).shape)
+
 
 
 class Net(nn.Module):
@@ -107,7 +115,9 @@ class Net(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2))
 
-        # add more layers
+        self.ResLayer1 = ResNetLayer(64, 64, n=3, expansion=1)
+        self.ResLayer2 = ResNetLayer(64, 64, n=3, expansion=1)
+        self.ResLayer3 = ResNetLayer(64, 64, n=3, expansion=1)
 
         self.deconv1 = nn.Sequential(
             nn.ConvTranspose2d(64, 32, kernel_size=9, stride=1, padding=2),
@@ -131,8 +141,12 @@ class Net(nn.Module):
 
         h = self.conv1(h)
         h = self.conv2(h)
-        # residual blocks or conv layers
-        h = self.deconv1(h)  # starting deconvolution
+        # Residual Layers to prevent vanishing gradient
+        h = self.ResLayer1(h)
+        h = self.ResLayer2(h)
+        h = self.ResLayer3(h)
+        # starting deconvolution
+        h = self.deconv1(h)
         h = self.deconv2(h)
         return h
 
@@ -221,7 +235,7 @@ optimizer = opt.Adam(net.parameters(), lr=0.07)
 criterion = nn.MSELoss()  # BCELoss()
 net = net.cuda()
 criterion = criterion.cuda()
-
+print(summary(net, (3, 28, 28)))
 # training process, loops through epoch (and batch or data-entries)
 for epoch in range(n_epochs):
     for i, batch in enumerate(data_loader):
