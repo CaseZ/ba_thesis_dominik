@@ -13,7 +13,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 fmnist_data = tv.datasets.FashionMNIST(root='./data/FashionMNIST', train=True, transform=tf.Compose([tf.ToTensor()]),
                                        target_transform=None, download=True)
-data_loader = torch.utils.data.DataLoader(fmnist_data, batch_size=4, shuffle=True, drop_last=True)
+data_loader = torch.utils.data.DataLoader(fmnist_data, batch_size=32, shuffle=True, drop_last=True)
 
 labels = {0: 'T-shirt/top', 1: 'Trouser', 2: 'Pullover', 3: 'Dress', 4: 'Coat', 5: 'Sandal', 6: 'Shirt', 7: 'Sneaker', 8: 'Bag', 9: 'Ankle boot'}
 
@@ -33,7 +33,7 @@ sigl, sigh = 100, 200
 # print batch
 #'''
 for i, batch in enumerate(data_loader):
-    if i == 1:
+    if i == (len(data_loader)-1):
         x, y = batch
         print(len(x))
         x0 = (np.reshape(x[0].numpy(), (28, 28))*255).astype(np.uint8)
@@ -49,7 +49,6 @@ for i, batch in enumerate(data_loader):
         plt.title(labels[y0])
         plt.show()
 #'''
-
 
 # Load image openCV
 #im2 = cv.imread(r'F:\Users\Dominik\Pictures\Orbception Warframe (bug).png')

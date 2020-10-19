@@ -105,31 +105,40 @@ class Net(nn.Module):
         super(Net, self).__init__()
 
         self.conv1 = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=9, stride=1, padding=2),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2))
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=2),
+            nn.Conv2d(3, 64, kernel_size=9, stride=1, padding=2),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2))
+            #nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=2),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            #nn.MaxPool2d(kernel_size=2, stride=2)
+        )
 
-        self.ResLayer1 = ResNetLayer(64, 64, n=3, expansion=1)
-        self.ResLayer2 = ResNetLayer(64, 64, n=3, expansion=1)
-        self.ResLayer3 = ResNetLayer(64, 64, n=3, expansion=1)
+        layers = [ResNetLayer(128, 128, n=3, expansion=1) for _ in range(9)]
+        self.ResLayer1 = layers[0]
+        self.ResLayer2 = layers[0]
+        self.ResLayer3 = layers[0]
+        self.ResLayer4 = layers[0]
+        self.ResLayer5 = layers[0]
+        self.ResLayer6 = layers[0]
+        #self.ResLayer7 = layers[0]
+        #self.ResLayer8 = layers[0]
+        #self.ResLayer9 = layers[0]
 
         self.deconv1 = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, kernel_size=9, stride=1, padding=2),
-            nn.BatchNorm2d(32),
+            nn.ConvTranspose2d(128, 64, kernel_size=9, stride=1, padding=2),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.Upsample(size=(16, 16))
+            #nn.Upsample(size=(16, 16))
         )
         self.deconv2 = nn.Sequential(
-            nn.ConvTranspose2d(32, 1, kernel_size=3, stride=1, padding=2),
+            nn.ConvTranspose2d(64, 1, kernel_size=3, stride=1, padding=2),
             nn.BatchNorm2d(1),
             nn.ReLU(inplace=True),
-            nn.Upsample(size=(28, 28))
+            #nn.Upsample(size=(28, 28))
         )
 
     def forward(self, h, thresholds=[]):
@@ -145,6 +154,12 @@ class Net(nn.Module):
         h = self.ResLayer1(h)
         h = self.ResLayer2(h)
         h = self.ResLayer3(h)
+        h = self.ResLayer4(h)
+        h = self.ResLayer5(h)
+        h = self.ResLayer6(h)
+        #h = self.ResLayer7(h)
+        #h = self.ResLayer8(h)
+        #h = self.ResLayer9(h)
         # starting deconvolution
         h = self.deconv1(h)
         h = self.deconv2(h)
@@ -158,8 +173,8 @@ class Net(nn.Module):
 
         x_train = x_train.float().cuda()
         y_train = y_train.float().cuda().unsqueeze(1)
-        x_val = x_val.cuda()
-        y_val = y_val.cuda().unsqueeze(1)
+        x_val = x_val.float().cuda()
+        y_val = y_val.float().cuda().unsqueeze(1)
         x_val.requires_grad = False
         y_val.requires_grad = False
 
@@ -203,8 +218,8 @@ gc.collect()
 torch.cuda.empty_cache()
 
 # declare variables
-batchsize = 32
-n_epochs = 25
+batchsize = 128
+n_epochs = 10
 train_losses = []
 val_losses = []
 labels = {0: 'T-shirt/top', 1: 'Trouser', 2: 'Pullover', 3: 'Dress', 4: 'Coat',
@@ -215,19 +230,28 @@ fmnist_data = tv.datasets.FashionMNIST(root='./data/FashionMNIST', train=True, t
                                        target_transform=None, download=True)
 
 # create contour images (y) and store thresholds as dimensions in X
-data = [(np.reshape(a.numpy(), (28, 28)) * 255).astype(np.uint8) for a in fmnist_data.data]
+data = [(np.reshape(a.numpy(), (28, 28))).astype(np.uint8) for a in fmnist_data.data]
 X = []
 Y = []
 for a in data:
     t2, t1 = r.randint(1, 256), r.randint(1, 256)
     Y.append(cv.Canny(a, t1, t2))
     X.append([a, np.full((28, 28), t1), np.full((28, 28), t2)])
+'''
+plt.imshow(a, cmap=plt.cm.gray)
+plt.show()
+plt.imshow(Y[len(data)-1], cmap=plt.cm.gray)
+plt.show()
+plt.imshow(X[len(data)-1][0], cmap=plt.cm.gray)
+plt.show()
+reggae
+'''
 
 # update dataset with new X and y
 fmnist_data.targets = Y
 fmnist_data.data = torch.FloatTensor(X)
 dataset = CannyDataset(fmnist_data)
-data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
+data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
 
 # create network
 net = Net()
@@ -255,18 +279,28 @@ plt.show()
 
 # visualize sample of X and y
 for i, batch in enumerate(data_loader):
-    if i == 1:
+    if i == (len(data_loader)-1):
         x, y = batch
-        x0 = (np.reshape(x[0][0].numpy(), (28, 28)) * 255).astype(np.uint8)
-        y0 = (np.reshape(y[0].numpy(), (28, 28)) * 255).astype(np.uint8)
-        plt.imshow(x0, cmap=plt.cm.gray)
-        plt.show()
-        plt.imshow(y0, cmap=plt.cm.gray)
+        axs = plt.subplots(8, 3)[1]
+
+        for a, ax in enumerate(axs):
+            im = output[a][0].cpu().detach().numpy()
+            x0 = (np.reshape(x[a][0].numpy(), (28, 28)) * 255).astype(np.uint8)
+            y0 = (np.reshape(y[a].numpy(), (28, 28)) * 255).astype(np.uint8)
+            t1, t2 = int(x[a][1][0][0].numpy()), int(x[a][2][0][0].numpy())
+
+            ax[0].imshow(x0, cmap=plt.cm.gray)
+            ax[0].set_title('input with Thresholds: ' + str(t1) + '' + str(t2))
+            ax[1].imshow(y0, cmap=plt.cm.gray)
+            ax[1].set_title('target')
+            ax[2].imshow(im, cmap=plt.cm.gray)
+            ax[2].set_title('output')
         plt.show()
 
 # visualize last output of network
-axs = plt.subplots(2, 8)[1].ravel()
+axs = plt.subplots(3, 16)[1].ravel()
 for i, ax in enumerate(axs):
     im = output[i][0].cpu().detach().numpy()
     ax.imshow(im, cmap=plt.cm.gray)
 plt.show()
+
