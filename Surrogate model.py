@@ -105,16 +105,16 @@ class Net(nn.Module):
         super(Net, self).__init__()
 
         self.conv1 = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=9, stride=1, padding=2),
+            nn.Conv2d(3, 64, kernel_size=9, stride=1, padding=4),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            #nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.MaxPool2d(kernel_size=4, stride=2, padding=1)
         )
         self.conv2 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=2),
+            nn.Conv2d(64, 128, kernel_size=5, stride=1, padding=2),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            #nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.MaxPool2d(kernel_size=4, stride=2, padding=1)
         )
 
         layers = [ResNetLayer(128, 128, n=3, expansion=1) for _ in range(9)]
@@ -124,21 +124,19 @@ class Net(nn.Module):
         self.ResLayer4 = layers[0]
         self.ResLayer5 = layers[0]
         self.ResLayer6 = layers[0]
-        #self.ResLayer7 = layers[0]
-        #self.ResLayer8 = layers[0]
-        #self.ResLayer9 = layers[0]
+        self.ResLayer7 = layers[0]
+        self.ResLayer8 = layers[0]
+        self.ResLayer9 = layers[0]
 
         self.deconv1 = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=9, stride=1, padding=2),
+            nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2, padding=0),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            #nn.Upsample(size=(16, 16))
         )
         self.deconv2 = nn.Sequential(
-            nn.ConvTranspose2d(64, 1, kernel_size=3, stride=1, padding=2),
+            nn.ConvTranspose2d(64, 1, kernel_size=2, stride=2, padding=0),
             nn.BatchNorm2d(1),
             nn.ReLU(inplace=True),
-            #nn.Upsample(size=(28, 28))
         )
 
     def forward(self, h, thresholds=[]):
@@ -157,9 +155,9 @@ class Net(nn.Module):
         h = self.ResLayer4(h)
         h = self.ResLayer5(h)
         h = self.ResLayer6(h)
-        #h = self.ResLayer7(h)
-        #h = self.ResLayer8(h)
-        #h = self.ResLayer9(h)
+        h = self.ResLayer7(h)
+        h = self.ResLayer8(h)
+        h = self.ResLayer9(h)
         # starting deconvolution
         h = self.deconv1(h)
         h = self.deconv2(h)
@@ -219,7 +217,7 @@ torch.cuda.empty_cache()
 
 # declare variables
 batchsize = 128
-n_epochs = 10
+n_epochs = 5
 train_losses = []
 val_losses = []
 labels = {0: 'T-shirt/top', 1: 'Trouser', 2: 'Pullover', 3: 'Dress', 4: 'Coat',
@@ -234,6 +232,7 @@ data = [(np.reshape(a.numpy(), (28, 28))).astype(np.uint8) for a in fmnist_data.
 X = []
 Y = []
 for a in data:
+    #a = cv.blur(a, (3, 3))
     t2, t1 = r.randint(1, 256), r.randint(1, 256)
     Y.append(cv.Canny(a, t1, t2))
     X.append([a, np.full((28, 28), t1), np.full((28, 28), t2)])
@@ -285,12 +284,12 @@ for i, batch in enumerate(data_loader):
 
         for a, ax in enumerate(axs):
             im = output[a][0].cpu().detach().numpy()
-            x0 = (np.reshape(x[a][0].numpy(), (28, 28)) * 255).astype(np.uint8)
-            y0 = (np.reshape(y[a].numpy(), (28, 28)) * 255).astype(np.uint8)
+            x0 = (np.reshape(x[a][0].numpy(), (28, 28))).astype(np.uint8)
+            y0 = (np.reshape(y[a].numpy(), (28, 28))).astype(np.uint8)
             t1, t2 = int(x[a][1][0][0].numpy()), int(x[a][2][0][0].numpy())
 
             ax[0].imshow(x0, cmap=plt.cm.gray)
-            ax[0].set_title('input with Thresholds: ' + str(t1) + '' + str(t2))
+            ax[0].set_title('input with Thresholds: ' + str(t1) + 'and ' + str(t2))
             ax[1].imshow(y0, cmap=plt.cm.gray)
             ax[1].set_title('target')
             ax[2].imshow(im, cmap=plt.cm.gray)
