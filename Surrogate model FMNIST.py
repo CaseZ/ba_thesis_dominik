@@ -119,14 +119,14 @@ class Net(nn.Module):
 
         layers = [ResNetLayer(128, 128, n=3, expansion=1) for _ in range(9)]
         self.ResLayer1 = layers[0]
-        self.ResLayer2 = layers[0]
-        self.ResLayer3 = layers[0]
-        self.ResLayer4 = layers[0]
-        self.ResLayer5 = layers[0]
-        self.ResLayer6 = layers[0]
-        self.ResLayer7 = layers[0]
-        self.ResLayer8 = layers[0]
-        self.ResLayer9 = layers[0]
+        self.ResLayer2 = layers[1]
+        self.ResLayer3 = layers[2]
+        self.ResLayer4 = layers[3]
+        self.ResLayer5 = layers[4]
+        self.ResLayer6 = layers[5]
+        self.ResLayer7 = layers[6]
+        self.ResLayer8 = layers[7]
+        self.ResLayer9 = layers[8]
 
         self.deconv1 = nn.Sequential(
             nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2, padding=0),
@@ -139,7 +139,16 @@ class Net(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def forward(self, h, thresholds=[]):
+        # same-convolution
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(1, 1, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(1),
+            nn.ReLU(inplace=True),
+        )
+
+
+
+    def forward(self, h):
         # s = h.shape
         # print(s)
         # print(thresholds[0])
@@ -161,6 +170,7 @@ class Net(nn.Module):
         # starting deconvolution
         h = self.deconv1(h)
         h = self.deconv2(h)
+        h = self.conv3(h)
         return h
 
     def train(self, epoch):
@@ -180,7 +190,7 @@ class Net(nn.Module):
         optimizer.zero_grad()
 
         # prediction for training and validation set
-        output_train = net(x_train, [t1, t2])
+        output_train = net(x_train)
         with torch.no_grad():
             output_val = net(x_val)
 
@@ -217,7 +227,7 @@ torch.cuda.empty_cache()
 
 # declare variables
 batchsize = 128
-n_epochs = 5
+n_epochs = 20
 train_losses = []
 val_losses = []
 labels = {0: 'T-shirt/top', 1: 'Trouser', 2: 'Pullover', 3: 'Dress', 4: 'Coat',
@@ -279,21 +289,26 @@ plt.show()
 # visualize sample of X and y
 for i, batch in enumerate(data_loader):
     if i == (len(data_loader)-1):
-        x, y = batch
+        X, y = batch
+        x_show = X.float().cuda()
+        y_show = y.float().cuda().unsqueeze(1)
+        output = net(x_show)
+
+
         axs = plt.subplots(8, 3)[1]
 
         for a, ax in enumerate(axs):
             im = output[a][0].cpu().detach().numpy()
-            x0 = (np.reshape(x[a][0].numpy(), (28, 28))).astype(np.uint8)
+            x0 = (np.reshape(X[a][0].numpy(), (28, 28))).astype(np.uint8)
             y0 = (np.reshape(y[a].numpy(), (28, 28))).astype(np.uint8)
-            t1, t2 = int(x[a][1][0][0].numpy()), int(x[a][2][0][0].numpy())
+            t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
 
             ax[0].imshow(x0, cmap=plt.cm.gray)
-            ax[0].set_title('input with Thresholds: ' + str(t1) + 'and ' + str(t2))
+            ax[0].set_title('input with Thresholds: ' + str(t1) + ' and ' + str(t2))
             ax[1].imshow(y0, cmap=plt.cm.gray)
-            ax[1].set_title('target')
+            #ax[1].set_title('target')
             ax[2].imshow(im, cmap=plt.cm.gray)
-            ax[2].set_title('output')
+            #ax[2].set_title('output')
         plt.show()
 
 # visualize last output of network
