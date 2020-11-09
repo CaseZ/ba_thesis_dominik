@@ -14,6 +14,7 @@ from torchvision import transforms as tf
 from torch.utils.data import Dataset, DataLoader
 from functools import partial
 from torchsummary import summary
+import hiddenlayer as hl
 
 ### temporary ###
 import os  # instead conda install nomkl
@@ -36,6 +37,22 @@ def conv_bn(in_channels, out_channels, conv, *args, **kwargs):
                                         'bn': nn.BatchNorm2d(out_channels)
                                       }))
 
+def render(net, path):
+    transforms = [
+        hl.transforms.Fold("Conv > BatchNorm > Relu > MaxPool", "ConvBnReluMaxP", "Convolution with Pooling"),
+        hl.transforms.Fold("ConvTranspose > BatchNorm > Relu", "ConvTransBnRelu", "Transposed Convolution"),
+        hl.transforms.Fold("Conv > BatchNorm > Relu", "ConvBnRelu", "Convolution"),
+        hl.transforms.Fold("Conv > BatchNorm", "ConvBn", "Convolution without ReLU"),
+        hl.transforms.Fold("""(ConvBnRelu > ConvBnRelu > ConvBn) > Add""", "BottleneckBlock", "Bottleneck Block"),
+        hl.transforms.Fold("""BottleneckBlock > BottleneckBlock > BottleneckBlock""", "ResLayer", "Residual Layer"),
+        hl.transforms.FoldDuplicates(),
+    ]
+    graph = hl.build_graph(net, torch.zeros([1, 3, 128, 128]).cuda(), transforms=transforms)
+    graph.theme = hl.graph.THEMES["blue"].copy()
+    Viz = graph.build_dot()
+    Viz.attr(rankdir="TB")
+    directory, file_name = os.path.split(path)
+    Viz.render(file_name, directory=directory, cleanup=True, format='png')
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, expansion=4, downsampling=1, conv=convAuto, *args, **kwargs):
@@ -246,15 +263,6 @@ for a in data:
     t2, t1 = r.randint(1, 256), r.randint(1, 256)
     Y.append(cv.Canny(a, t1, t2))
     X.append([a, np.full((28, 28), t1), np.full((28, 28), t2)])
-'''
-plt.imshow(a, cmap=plt.cm.gray)
-plt.show()
-plt.imshow(Y[len(data)-1], cmap=plt.cm.gray)
-plt.show()
-plt.imshow(X[len(data)-1][0], cmap=plt.cm.gray)
-plt.show()
-reggae
-'''
 
 # update dataset with new X and y
 fmnist_data.targets = Y
@@ -268,7 +276,11 @@ optimizer = opt.Adam(net.parameters(), lr=0.07)
 criterion = nn.MSELoss()  # BCELoss()
 net = net.cuda()
 criterion = criterion.cuda()
-print(summary(net, (3, 28, 28)))
+
+# visualizing architecture
+#print(summary(net, (3, 28, 28)))
+#render(net, path='data/graph_minimal')
+
 # training process, loops through epoch (and batch or data-entries)
 for epoch in range(n_epochs):
     for i, batch in enumerate(data_loader):
