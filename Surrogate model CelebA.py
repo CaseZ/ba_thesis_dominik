@@ -270,7 +270,9 @@ print(len(x), len(x[0]), len(x[0][0]), len(x[0][0][0]))
 # update dataset with new X and y
 celebA_data.targets = Y
 celebA_data.data = x
+print(celebA_data.data[0])
 dataset = CannyDataset(celebA_data)
+print(dataset.data[0])
 data_loader = DataLoader(celebA_data, batch_size=batchsize, shuffle=False, drop_last=True)
 
 # create network
@@ -283,9 +285,9 @@ print(summary(net, (3, 218, 178)))
 # training process, loops through epoch (and batch or data-entries)
 for epoch in range(n_epochs):
     for i, batch in enumerate(data_loader):
-        # this fucks up!
-        # fucking dataloader loses my 3 dimensions, batch already 1D
-        # bruh
+        # this screws up!
+        # dataloader loses my 2nd and 3rd dimensions, batch already 1D
+        # bruh why
         X, y = batch
         output = net.train(epoch)
     if epoch % 2 == 0:
