@@ -115,7 +115,7 @@ class Net(nn.Module):
             nn.Conv2d(64, 128, kernel_size=5, stride=1, padding=2),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=4, stride=2, padding=1)
+            nn.MaxPool2d(kernel_size=5, stride=2, padding=1)
         )
 
         layers = [ResNetLayer(128, 128, n=3, expansion=1) for _ in range(9)]
@@ -124,13 +124,13 @@ class Net(nn.Module):
         self.ResLayer3 = layers[2]
         self.ResLayer4 = layers[3]
         self.ResLayer5 = layers[4]
-        self.ResLayer6 = layers[5]
-        self.ResLayer7 = layers[6]
-        self.ResLayer8 = layers[7]
-        self.ResLayer9 = layers[8]
+        #self.ResLayer6 = layers[5]
+        #self.ResLayer7 = layers[6]
+        #self.ResLayer8 = layers[7]
+        #self.ResLayer9 = layers[8]
 
         self.deconv1 = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2, padding=0),
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=0),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
         )
@@ -162,10 +162,10 @@ class Net(nn.Module):
         h = self.ResLayer3(h)
         h = self.ResLayer4(h)
         h = self.ResLayer5(h)
-        h = self.ResLayer6(h)
-        h = self.ResLayer7(h)
-        h = self.ResLayer8(h)
-        h = self.ResLayer9(h)
+        #h = self.ResLayer6(h)
+        #h = self.ResLayer7(h)
+        #h = self.ResLayer8(h)
+        #h = self.ResLayer9(h)
         # starting deconvolution
         h = self.deconv1(h)
         h = self.deconv2(h)
@@ -221,7 +221,7 @@ class CannyDataset(Dataset):
         t2 = r.randint(t1, 255)
 
         img = self.data[index][0]
-        target = torch.tensor(cv.Canny((img[0].numpy()*255).astype(np.uint8), t1, t2)).unsqueeze(0)
+        target = torch.tensor(cv.Canny((img[0].numpy()*255).astype(np.uint8), t1, t2))
         img = torch.cat([img, torch.full(img.shape, t1, dtype=torch.float), torch.full(img.shape, t2, dtype=torch.float)])
         return img, target
 
