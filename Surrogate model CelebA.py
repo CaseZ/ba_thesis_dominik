@@ -120,14 +120,14 @@ class Net(nn.Module):
 
         layers = [ResNetLayer(128, 128, n=3, expansion=1) for _ in range(9)]
         self.ResLayer1 = layers[0]
-        self.ResLayer2 = layers[0]
-        self.ResLayer3 = layers[0]
-        self.ResLayer4 = layers[0]
-        self.ResLayer5 = layers[0]
-        self.ResLayer6 = layers[0]
-        self.ResLayer7 = layers[0]
-        self.ResLayer8 = layers[0]
-        self.ResLayer9 = layers[0]
+        self.ResLayer2 = layers[1]
+        self.ResLayer3 = layers[2]
+        self.ResLayer4 = layers[3]
+        self.ResLayer5 = layers[4]
+        self.ResLayer6 = layers[5]
+        self.ResLayer7 = layers[6]
+        self.ResLayer8 = layers[7]
+        self.ResLayer9 = layers[8]
 
         self.deconv1 = nn.Sequential(
             nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2, padding=0),
@@ -140,7 +140,12 @@ class Net(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # convolution
+        # same-convolution
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(1, 1, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(1),
+            nn.ReLU(inplace=True),
+        )
 
     def forward(self, h, thresholds=[]):
         # s = h.shape
@@ -164,10 +169,11 @@ class Net(nn.Module):
         # starting deconvolution
         h = self.deconv1(h)
         h = self.deconv2(h)
+        h = self.conv3(h)
         return h
 
     def train(self, epoch):
-        x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33) #, random_state=42
+        x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
         tr_loss = 0
         x_train, y_train = autog.Variable(x_train), autog.Variable(y_train)
         #x_val, y_val = autog.Variable(x_val), autog.Variable(y_val)
@@ -183,7 +189,7 @@ class Net(nn.Module):
         optimizer.zero_grad()
 
         # prediction for training and validation set
-        output_train = net(x_train, [t1, t2])
+        output_train = net(x_train)
         with torch.no_grad():
             output_val = net(x_val)
 
@@ -205,40 +211,41 @@ class CannyDataset(Dataset):
 
     def __init__(self, data, train=True, transform=None, target_transform=None,
                  download=False):
-        self.data, self.targets = data.data, data.targets
+        self.data = data
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, index):
-        img, target = self.data[index], self.targets[index]
+        t1 = r.randint(1, 255)
+        t2 = r.randint(t1, 255)
 
+        img = self.data[index][0]
+        target = torch.tensor(cv.Canny((img[0].numpy()*255).astype(np.uint8), t1, t2)).unsqueeze(0)
+        img = torch.cat([img, torch.full(img.shape, t1, dtype=torch.float), torch.full(img.shape, t2, dtype=torch.float)])
         return img, target
 
 gc.collect()
 torch.cuda.empty_cache()
 
 # declare variables
-batchsize = 128
+batchsize = 10
 n_epochs = 5
 train_losses = []
 val_losses = []
-labels = {0: 'T-shirt/top', 1: 'Trouser', 2: 'Pullover', 3: 'Dress', 4: 'Coat',
-          5: 'Sandal', 6: 'Shirt', 7: 'Sneaker', 8: 'Bag', 9: 'Ankle boot'}
+shapeX, shapeY = 218, 178
+
 
 # LOADING DATASET
 #celebA_data = tv.datasets.CelebA(root='./data/CelebA', split='train',
 #                                 transform=tf.Compose([tf.transforms.Grayscale(1), tf.ToTensor()]),
 #                                 target_transform=None, download=False
 #                                 )
-
 celebA_data = tv.datasets.ImageFolder(root='./data/CelebA',
                                  transform=tf.Compose([tf.transforms.Grayscale(1), tf.ToTensor()]),
                                  target_transform=None
                                  )
 
-shapeX, shapeY = 218, 178
-data = []
 
 # create tensor of data, convert to UTF-8
 #data = torch.tensor([(a[0].numpy() * 255).astype(np.uint8) for (a, b) in celebA_data])
@@ -248,33 +255,23 @@ torch.save(data.clone(), 'data.pt')
 print("saved!")
 '''
 
-data = torch.load('data.pt')
-print('loaded!')
-celebA_data.data = data
-print(len(celebA_data.data))
+#data = torch.load('data.pt')
+#print('loaded!')
+#celebA_data.data = data
+#print(len(celebA_data.data))
 
 # create contour images (y) and store thresholds as dimensions in X
-x = []
-Y = []
-for a in data:
-    #a = cv.blur(a, (3, 3))
-    t2, t1 = r.randint(1, 256), r.randint(1, 256)
-    Y.append([cv.Canny(a.numpy(), t1, t2)])
-    x.append([a, torch.tensor(np.full((shapeX, shapeY), t1)), torch.tensor(np.full((shapeX, shapeY), t2))])
+
+#print('shapes: ')
+#print(len(Y), len(Y[0]), len(Y[0][0]), len(Y[0][0][0]))
+#print(len(x), len(x[0]), len(x[0][0]), len(x[0][0][0]))
 
 
-print('shapes: ')
-print(len(Y), len(Y[0]), len(Y[0][0]), len(Y[0][0][0]))
-print(len(x), len(x[0]), len(x[0][0]), len(x[0][0][0]))
-
-# update dataset with new X and y
-celebA_data.targets = Y
-celebA_data.data = x
-print(celebA_data.data[0])
 dataset = CannyDataset(celebA_data)
-print(dataset.data[0])
-data_loader = DataLoader(celebA_data, batch_size=batchsize, shuffle=False, drop_last=True)
-
+data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
+img, trg = next(iter(data_loader))
+print("target shape: ", trg.shape)
+print("image shape: ", img.shape)
 # create network
 net = Net()
 optimizer = opt.Adam(net.parameters(), lr=0.07)
@@ -282,12 +279,11 @@ criterion = nn.MSELoss()  # BCELoss()
 net = net.cuda()
 criterion = criterion.cuda()
 print(summary(net, (3, 218, 178)))
+
+
 # training process, loops through epoch (and batch or data-entries)
 for epoch in range(n_epochs):
     for i, batch in enumerate(data_loader):
-        # this screws up!
-        # dataloader loses my 2nd and 3rd dimensions, batch already 1D
-        # bruh why
         X, y = batch
         output = net.train(epoch)
     if epoch % 2 == 0:
