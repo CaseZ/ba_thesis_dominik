@@ -305,8 +305,6 @@ for i, batch in enumerate(data_loader):
         x_show = X.float().cuda()
         y_show = y.float().cuda().unsqueeze(1)
         output = net(x_show)
-
-
         axs = plt.subplots(8, 3)[1]
 
         for a, ax in enumerate(axs):

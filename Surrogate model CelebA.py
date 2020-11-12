@@ -14,7 +14,7 @@ from torchvision import transforms as tf
 from torch.utils.data import Dataset, DataLoader
 from functools import partial
 from torchsummary import summary
-import PIL
+import hiddenlayer as hl
 
 ### temporary ###
 import os  # instead conda install nomkl
@@ -37,6 +37,22 @@ def conv_bn(in_channels, out_channels, conv, *args, **kwargs):
                                         'bn': nn.BatchNorm2d(out_channels)
                                       }))
 
+def render(net, path):
+    transforms = [
+        hl.transforms.Fold("Conv > BatchNorm > Relu > MaxPool", "ConvBnReluMaxP", "Convolution with Pooling"),
+        hl.transforms.Fold("ConvTranspose > BatchNorm > Relu", "ConvTransBnRelu", "Transposed Convolution"),
+        hl.transforms.Fold("Conv > BatchNorm > Relu", "ConvBnRelu", "Convolution"),
+        hl.transforms.Fold("Conv > BatchNorm", "ConvBn", "Convolution without ReLU"),
+        hl.transforms.Fold("""(ConvBnRelu > ConvBnRelu > ConvBn) > Add""", "BottleneckBlock", "Bottleneck Block"),
+        hl.transforms.Fold("""BottleneckBlock > BottleneckBlock > BottleneckBlock""", "ResLayer", "Residual Layer"),
+        hl.transforms.FoldDuplicates(),
+    ]
+    graph = hl.build_graph(net, torch.zeros([1, 3, 128, 128]).cuda(), transforms=transforms)
+    graph.theme = hl.graph.THEMES["blue"].copy()
+    Viz = graph.build_dot()
+    Viz.attr(rankdir="TB")
+    directory, file_name = os.path.split(path)
+    Viz.render(file_name, directory=directory, cleanup=True, format='png')
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, expansion=4, downsampling=1, conv=convAuto, *args, **kwargs):
@@ -219,8 +235,9 @@ class CannyDataset(Dataset):
     def __getitem__(self, index):
         t1 = r.randint(1, 255)
         t2 = r.randint(t1, 255)
-
         img = self.data[index][0]
+
+        # create contour images (y) and store thresholds as dimensions in X
         target = torch.tensor(cv.Canny((img[0].numpy()*255).astype(np.uint8), t1, t2))
         img = torch.cat([img, torch.full(img.shape, t1, dtype=torch.float), torch.full(img.shape, t2, dtype=torch.float)])
         return img, target
@@ -233,14 +250,9 @@ batchsize = 10
 n_epochs = 5
 train_losses = []
 val_losses = []
-shapeX, shapeY = 218, 178
 
 
 # LOADING DATASET
-#celebA_data = tv.datasets.CelebA(root='./data/CelebA', split='train',
-#                                 transform=tf.Compose([tf.transforms.Grayscale(1), tf.ToTensor()]),
-#                                 target_transform=None, download=False
-#                                 )
 celebA_data = tv.datasets.ImageFolder(root='./data/CelebA',
                                  transform=tf.Compose([tf.transforms.Grayscale(1), tf.ToTensor()]),
                                  target_transform=None
@@ -253,33 +265,25 @@ celebA_data = tv.datasets.ImageFolder(root='./data/CelebA',
 print("done creating tensor")
 torch.save(data.clone(), 'data.pt')
 print("saved!")
+
+data = torch.load('data.pt')
+print('loaded!')
+celebA_data.data = data
+print(len(celebA_data.data))
 '''
-
-#data = torch.load('data.pt')
-#print('loaded!')
-#celebA_data.data = data
-#print(len(celebA_data.data))
-
-# create contour images (y) and store thresholds as dimensions in X
-
-#print('shapes: ')
-#print(len(Y), len(Y[0]), len(Y[0][0]), len(Y[0][0][0]))
-#print(len(x), len(x[0]), len(x[0][0]), len(x[0][0][0]))
-
 
 dataset = CannyDataset(celebA_data)
 data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
-img, trg = next(iter(data_loader))
-print("target shape: ", trg.shape)
-print("image shape: ", img.shape)
+
 # create network
 net = Net()
 optimizer = opt.Adam(net.parameters(), lr=0.07)
 criterion = nn.MSELoss()  # BCELoss()
 net = net.cuda()
 criterion = criterion.cuda()
-print(summary(net, (3, 218, 178)))
-
+# visualizing architecture
+#print(summary(net, (3, 218, 178)))
+#render(net, path='data/graph_minimal')
 
 # training process, loops through epoch (and batch or data-entries)
 for epoch in range(n_epochs):
@@ -299,21 +303,24 @@ plt.show()
 # visualize sample of X and y
 for i, batch in enumerate(data_loader):
     if i == (len(data_loader)-1):
-        x, y = batch
+        X, y = batch
+        x_show = X.float().cuda()
+        y_show = y.float().cuda().unsqueeze(1)
+        output = net(x_show)
         axs = plt.subplots(8, 3)[1]
 
         for a, ax in enumerate(axs):
             im = output[a][0].cpu().detach().numpy()
-            x0 = (np.reshape(x[a][0].numpy(), (28, 28))).astype(np.uint8)
+            x0 = (np.reshape(X[a][0].numpy(), (28, 28))).astype(np.uint8)
             y0 = (np.reshape(y[a].numpy(), (28, 28))).astype(np.uint8)
-            t1, t2 = int(x[a][1][0][0].numpy()), int(x[a][2][0][0].numpy())
+            t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
 
             ax[0].imshow(x0, cmap=plt.cm.gray)
-            ax[0].set_title('input with Thresholds: ' + str(t1) + 'and ' + str(t2))
+            ax[0].set_title('input with Thresholds: ' + str(t1) + ' and ' + str(t2))
             ax[1].imshow(y0, cmap=plt.cm.gray)
-            ax[1].set_title('target')
+            #ax[1].set_title('target')
             ax[2].imshow(im, cmap=plt.cm.gray)
-            ax[2].set_title('output')
+            #ax[2].set_title('output')
         plt.show()
 
 # visualize last output of network
