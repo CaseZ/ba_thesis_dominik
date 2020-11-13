@@ -133,6 +133,7 @@ class Net(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=5, stride=2, padding=1)
         )
+        # more pooling
 
         layers = [ResNetLayer(128, 128, n=3, expansion=1) for _ in range(9)]
         self.ResLayer1 = layers[0]
@@ -156,14 +157,20 @@ class Net(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # same-convolution
-        self.conv3 = nn.Sequential(
+        # same-convolution after upsampling / deconvoluting
+        self.sConv1 = nn.Sequential(
             nn.Conv2d(1, 1, kernel_size=5, stride=1, padding=2),
             nn.BatchNorm2d(1),
             nn.ReLU(inplace=True),
         )
 
-    def forward(self, h, thresholds=[]):
+        self.sConv2 = nn.Sequential(
+            nn.Conv2d(1, 1, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(1),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, h):
         # s = h.shape
         # print(s)
         # print(thresholds[0])
@@ -185,7 +192,8 @@ class Net(nn.Module):
         # starting deconvolution
         h = self.deconv1(h)
         h = self.deconv2(h)
-        h = self.conv3(h)
+        h = self.sConv1(h)
+        h = self.sConv2(h)
         return h
 
     def train(self, epoch):
@@ -246,11 +254,10 @@ gc.collect()
 torch.cuda.empty_cache()
 
 # declare variables
-batchsize = 10
-n_epochs = 5
+batchsize = 42
+n_epochs = 10
 train_losses = []
 val_losses = []
-
 
 # LOADING DATASET
 celebA_data = tv.datasets.ImageFolder(root='./data/CelebA',
@@ -303,16 +310,16 @@ plt.show()
 # visualize sample of X and y
 for i, batch in enumerate(data_loader):
     if i == (len(data_loader)-1):
-        X, y = batch
-        x_show = X.float().cuda()
-        y_show = y.float().cuda().unsqueeze(1)
+        X, y = batch[0:30]
+        x_show = X[0:30].float().cuda()
+        y_show = y[0:30].float().cuda().unsqueeze(1)
         output = net(x_show)
         axs = plt.subplots(8, 3)[1]
 
         for a, ax in enumerate(axs):
             im = output[a][0].cpu().detach().numpy()
-            x0 = (np.reshape(X[a][0].numpy(), (28, 28))).astype(np.uint8)
-            y0 = (np.reshape(y[a].numpy(), (28, 28))).astype(np.uint8)
+            x0 = (X[a][0].numpy()*255).astype(np.uint8)
+            y0 = (y[a].numpy()).astype(np.uint8)
             t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
 
             ax[0].imshow(x0, cmap=plt.cm.gray)
@@ -324,7 +331,7 @@ for i, batch in enumerate(data_loader):
         plt.show()
 
 # visualize last output of network
-axs = plt.subplots(3, 16)[1].ravel()
+axs = plt.subplots(3, 9)[1].ravel()
 for i, ax in enumerate(axs):
     im = output[i][0].cpu().detach().numpy()
     ax.imshow(im, cmap=plt.cm.gray)
