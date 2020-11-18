@@ -14,6 +14,8 @@ from torchvision import transforms as tf
 from torch.utils.data import Dataset, DataLoader
 from functools import partial
 from torchsummary import summary
+import piq
+from typing import Union, Tuple
 import hiddenlayer as hl
 
 ### temporary ###
@@ -54,7 +56,7 @@ def render(net, path):
     directory, file_name = os.path.split(path)
     Viz.render(file_name, directory=directory, cleanup=True, format='png')
 
-class ResidualBlock(nn.Module):
+class ResidualBottleNeckBlock(nn.Module):
     def __init__(self, in_channels, out_channels, expansion=4, downsampling=1, conv=convAuto, *args, **kwargs):
         super().__init__()
 
@@ -92,7 +94,7 @@ class ResidualBlock(nn.Module):
 
 
 class ResNetLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, block=ResidualBlock, n=1, *args, **kwargs):
+    def __init__(self, in_channels, out_channels, block=ResidualBottleNeckBlock, n=1, *args, **kwargs):
         super().__init__()
         downsampling = 2 if in_channels != out_channels else 1
 
@@ -135,17 +137,19 @@ class Net(nn.Module):
         )
         # more pooling
 
-        layers = [ResNetLayer(128, 128, n=3, expansion=1) for _ in range(9)]
-        self.ResLayer1 = layers[0]
-        self.ResLayer2 = layers[1]
-        self.ResLayer3 = layers[2]
-        self.ResLayer4 = layers[3]
-        self.ResLayer5 = layers[4]
-        #self.ResLayer6 = layers[5]
-        #self.ResLayer7 = layers[6]
-        #self.ResLayer8 = layers[7]
-        #self.ResLayer9 = layers[8]
+        self.ResLayer1 = ResNetLayer(128, 128, n=9, expansion=1)
+        self.ResLayer2 = ResNetLayer(128, 256, n=9, expansion=1)
+        self.ResLayer3 = ResNetLayer(256, 256, n=9, expansion=1)
+        self.ResLayer4 = ResNetLayer(256, 256, n=9, expansion=1)
+        self.ResLayer5 = ResNetLayer(256, 256, n=9, expansion=1)
+        self.ResLayer6 = ResNetLayer(256, 256, n=9, expansion=1)
 
+        # transposed convolution
+        self.deconv3 = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2, padding=0),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+        )
         self.deconv1 = nn.Sequential(
             nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=0),
             nn.BatchNorm2d(64),
@@ -156,7 +160,21 @@ class Net(nn.Module):
             nn.BatchNorm2d(1),
             nn.ReLU(inplace=True),
         )
+        '''
+        self.deconv1 = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Upsample(size=(109, 89), mode='bilinear')
+        )
 
+        self.deconv2 = nn.Sequential(
+            nn.Conv2d(64, 1, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(1),
+            nn.ReLU(inplace=True),
+            nn.Upsample(size=(218, 178), mode='bilinear')
+        )
+        '''
         # same-convolution after upsampling / deconvoluting
         self.sConv1 = nn.Sequential(
             nn.Conv2d(1, 1, kernel_size=5, stride=1, padding=2),
@@ -179,17 +197,17 @@ class Net(nn.Module):
 
         h = self.conv1(h)
         h = self.conv2(h)
-        # Residual Layers to prevent vanishing gradient
+
+        # Residual Layers
         h = self.ResLayer1(h)
         h = self.ResLayer2(h)
         h = self.ResLayer3(h)
         h = self.ResLayer4(h)
         h = self.ResLayer5(h)
-        #h = self.ResLayer6(h)
-        #h = self.ResLayer7(h)
-        #h = self.ResLayer8(h)
-        #h = self.ResLayer9(h)
+        h = self.ResLayer6(h)
+
         # starting deconvolution
+        h = self.deconv3(h)
         h = self.deconv1(h)
         h = self.deconv2(h)
         h = self.sConv1(h)
@@ -197,6 +215,8 @@ class Net(nn.Module):
         return h
 
     def train(self, epoch):
+        if epoch == False:
+            return []
         x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
         tr_loss = 0
         x_train, y_train = autog.Variable(x_train), autog.Variable(y_train)
@@ -221,8 +241,14 @@ class Net(nn.Module):
         loss_train = criterion(output_train, y_train)
         with torch.no_grad():
             loss_val = criterion(output_val, y_val)
-        train_losses.append(loss_train)
-        val_losses.append(loss_val)
+        train_losses.append(loss_train.cpu().detach().numpy())
+        val_losses.append(loss_val.cpu().detach().numpy())
+
+        # SSIM loss
+        ssim_train = piq.ssim(output_train, y_train, data_range=1.)
+        ssim_val = piq.ssim(output_val, y_val, data_range=1.)
+        SSIM_train.append(ssim_train.cpu().detach().numpy())
+        SSIM_val.append(ssim_val.cpu().detach().numpy())
 
         # computing the updated weights of all the model parameters
         loss_train.backward()
@@ -233,16 +259,18 @@ class Net(nn.Module):
 
 class CannyDataset(Dataset):
 
-    def __init__(self, data, train=True, transform=None, target_transform=None,
+    def __init__(self, data, topMargin=0, bottomMargin=0, train=True, transform=None, target_transform=None,
                  download=False):
         self.data = data
+        self.topMargin = topMargin
+        self.bottomMargin = bottomMargin
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, index):
-        t1 = r.randint(1, 255)
-        t2 = r.randint(t1, 255)
+        t1 = r.randint(1+self.bottomMargin, 900-self.topMargin)
+        t2 = r.randint(t1, 900-self.topMargin)
         img = self.data[index][0]
 
         # create contour images (y) and store thresholds as dimensions in X
@@ -254,17 +282,23 @@ gc.collect()
 torch.cuda.empty_cache()
 
 # declare variables
-batchsize = 42
-n_epochs = 10
-train_losses = []
-val_losses = []
+batchsize = 22
+maxT = 900
+topMargin = 400
+bottomMargin = 75
+n_epochs = 5
+lr = 0.005
+trained = 0
+continueTraining = 1
+PATH = "state_dict_model_latest.pt"
+train_losses, val_losses = [], []
+SSIM_train, SSIM_val = [], []
 
 # LOADING DATASET
 celebA_data = tv.datasets.ImageFolder(root='./data/CelebA',
                                  transform=tf.Compose([tf.transforms.Grayscale(1), tf.ToTensor()]),
                                  target_transform=None
                                  )
-
 
 # create tensor of data, convert to UTF-8
 #data = torch.tensor([(a[0].numpy() * 255).astype(np.uint8) for (a, b) in celebA_data])
@@ -279,51 +313,106 @@ celebA_data.data = data
 print(len(celebA_data.data))
 '''
 
-dataset = CannyDataset(celebA_data)
+dataset = CannyDataset(celebA_data, topMargin=topMargin, bottomMargin=bottomMargin)
 data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
 
 # create network
 net = Net()
-optimizer = opt.Adam(net.parameters(), lr=0.07)
-criterion = nn.MSELoss()  # BCELoss()
+optimizer = opt.AdamW(net.parameters(), lr=lr)
+criterion = nn.MSELoss()
 net = net.cuda()
 criterion = criterion.cuda()
 # visualizing architecture
 #print(summary(net, (3, 218, 178)))
 #render(net, path='data/graph_minimal')
 
+
+if trained or continueTraining:
+    # Load model
+    print("loading model")
+    net.load_state_dict(torch.load(PATH))
+    net.eval()
+
+
 # training process, loops through epoch (and batch or data-entries)
-for epoch in range(n_epochs):
-    for i, batch in enumerate(data_loader):
-        X, y = batch
-        output = net.train(epoch)
-    if epoch % 2 == 0:
-        print('Epoch : ', epoch + 1, '\t')  # , 'loss :', loss_val)
+if not trained:
+    print("training model")
+    for epoch in range(n_epochs):
+        for i, batch in enumerate(data_loader):
+            X, y = batch
+            output = net.train(epoch)
+        if epoch % 2 == 0:
+            print('Epoch : ', epoch + 1, '\t')  # , 'loss :', loss_val)
+    # Save model
+    print("saving model")
+    torch.save(net.state_dict(), PATH)
+    print("saved model")
+    gc.collect()
+    torch.cuda.empty_cache()
 
+    axs = plt.subplots(2, 1)[1].ravel()
+    # plot loss
+    axs[0].plot(train_losses, label='Training loss', alpha=0.3)
+    axs[0].plot(val_losses, label='Validation loss', alpha=0.6)
+    axs[0].set_xlabel('batches')
+    axs[0].legend()
 
-# plot loss
-plt.plot(train_losses, label='Training loss')
-plt.plot(val_losses, label='Validation loss')
-plt.legend()
-plt.show()
+    # plot SSIM
+    axs[1].plot(SSIM_train, label='Training SSIM', alpha=0.3)
+    axs[1].plot(SSIM_val, label='Validation SSIM', alpha=0.6)
+    axs[1].set_xlabel('batches')
+    axs[1].legend()
+    plt.show()
+
 
 # visualize sample of X and y
+print("visualizing  output")
 for i, batch in enumerate(data_loader):
-    if i == (len(data_loader)-1):
-        X, y = batch[0:30]
-        x_show = X[0:30].float().cuda()
-        y_show = y[0:30].float().cuda().unsqueeze(1)
+    if i == 0:  # (len(data_loader)-1)
+        X, y = batch[0:20]
+        x_show = X[0:20].float().cuda()
+        y_show = y[0:20].float().cuda().unsqueeze(1)
         output = net(x_show)
-        axs = plt.subplots(8, 3)[1]
+        axs = plt.subplots(6, 3)[1]
 
+        # image comparison plot
         for a, ax in enumerate(axs):
             im = output[a][0].cpu().detach().numpy()
             x0 = (X[a][0].numpy()*255).astype(np.uint8)
             y0 = (y[a].numpy()).astype(np.uint8)
             t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
 
+            ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
             ax[0].imshow(x0, cmap=plt.cm.gray)
-            ax[0].set_title('input with Thresholds: ' + str(t1) + ' and ' + str(t2))
+            ax[0].set_title('Thresholds: ' + str(t1) + ' and ' + str(t2))
+            ax[1].imshow(y0, cmap=plt.cm.gray)
+            #ax[1].set_title('target')
+            ax[2].imshow(im, cmap=plt.cm.gray)
+            #ax[2].set_title('output')
+        plt.show()
+
+        # threshold comparison
+        axs = plt.subplots(10, 3)[1]
+        a = np.random.randint(0, len(batch))
+        im = output[a][0].cpu().detach().numpy()
+        for index, ax in enumerate(axs):
+            x0 = (X[a][0].numpy()*255).astype(np.uint8)
+            y0 = (y[a].numpy()).astype(np.uint8)
+            t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
+
+            t1 = r.randint(1 + bottomMargin, 900 - topMargin)
+            t2 = r.randint((t1-topMargin if t1 > (maxT-topMargin) else t1), maxT - topMargin)
+            t1 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t1
+            t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
+            y0 = cv.Canny(x0, t1, t2)
+
+            x0 = X[a][0].unsqueeze(0)
+            x0 = net(torch.cat([x0, torch.full(x0.shape, t1, dtype=torch.float), torch.full(x0.shape, t2, dtype=torch.float)]).unsqueeze(0).cuda())
+            x0 = x0[0][0].cpu().detach()
+
+            ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
+            ax[0].imshow(x0, cmap=plt.cm.gray)
+            ax[0].set_title(str(t1) + '   and   ' + str(t2))
             ax[1].imshow(y0, cmap=plt.cm.gray)
             #ax[1].set_title('target')
             ax[2].imshow(im, cmap=plt.cm.gray)
@@ -331,8 +420,9 @@ for i, batch in enumerate(data_loader):
         plt.show()
 
 # visualize last output of network
-axs = plt.subplots(3, 9)[1].ravel()
+axs = plt.subplots(2, 9)[1].ravel()
 for i, ax in enumerate(axs):
+    ax.axis('off')
     im = output[i][0].cpu().detach().numpy()
     ax.imshow(im, cmap=plt.cm.gray)
 plt.show()
