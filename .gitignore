@@ -1,2 +1,8 @@
 
 data.pt
+state_dict_model_latest - 9x5_50eps_0.005.pt
+*.jpg
+*.wav
+*.mp3
+*.pt
+data/ImageNet/imagenet_images/ground ivy/2439871429_307bf6d1d7.jpg%3Fv%3D0
