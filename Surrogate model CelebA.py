@@ -17,6 +17,7 @@ from torchsummary import summary
 import piq
 from typing import Union, Tuple
 import hiddenlayer as hl
+import winsound
 
 ### temporary ###
 import os  # instead conda install nomkl
@@ -282,17 +283,18 @@ gc.collect()
 torch.cuda.empty_cache()
 
 # declare variables
-batchsize = 22
-maxT = 900
+batchsize = 15
+duplicates = 3
 topMargin = 400
-bottomMargin = 75
-n_epochs = 5
+bottomMargin = 0 #75
+n_epochs = 10
 lr = 0.005
 trained = 0
 continueTraining = 1
 PATH = "state_dict_model_latest.pt"
 train_losses, val_losses = [], []
 SSIM_train, SSIM_val = [], []
+maxT = 900      # DO NOT CHANGE
 
 # LOADING DATASET
 celebA_data = tv.datasets.ImageFolder(root='./data/CelebA',
@@ -314,7 +316,14 @@ print(len(celebA_data.data))
 '''
 
 dataset = CannyDataset(celebA_data, topMargin=topMargin, bottomMargin=bottomMargin)
+
+
+#for _ in range(1, duplicates):
+    #dataset2 = CannyDataset(celebA_data, topMargin=topMargin, bottomMargin=bottomMargin)
+    #dataset = torch.utils.data.ConcatDataset([dataset, dataset2])
+
 data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
+print('length of dataset: ', len(dataset), ' with number of duplicates: ', duplicates)
 
 # create network
 net = Net()
@@ -338,6 +347,10 @@ if trained or continueTraining:
 if not trained:
     print("training model")
     for epoch in range(n_epochs):
+        dataset = CannyDataset(celebA_data, topMargin=topMargin, bottomMargin=bottomMargin)
+        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
+
+        # training with minibatch
         for i, batch in enumerate(data_loader):
             X, y = batch
             output = net.train(epoch)
@@ -349,6 +362,7 @@ if not trained:
     print("saved model")
     gc.collect()
     torch.cuda.empty_cache()
+    winsound.PlaySound('RAN-D & VILLAIN - CORONA GO FCK YOURSELF.wav', winsound.SND_FILENAME)
 
     axs = plt.subplots(2, 1)[1].ravel()
     # plot loss
@@ -373,8 +387,8 @@ for i, batch in enumerate(data_loader):
         x_show = X[0:20].float().cuda()
         y_show = y[0:20].float().cuda().unsqueeze(1)
         output = net(x_show)
-        axs = plt.subplots(6, 3)[1]
 
+        axs = plt.subplots(6, 3)[1]
         # image comparison plot
         for a, ax in enumerate(axs):
             im = output[a][0].cpu().detach().numpy()
@@ -383,40 +397,48 @@ for i, batch in enumerate(data_loader):
             t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
 
             ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
-            ax[0].imshow(x0, cmap=plt.cm.gray)
+            ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
             ax[0].set_title('Thresholds: ' + str(t1) + ' and ' + str(t2))
-            ax[1].imshow(y0, cmap=plt.cm.gray)
+            ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
             #ax[1].set_title('target')
-            ax[2].imshow(im, cmap=plt.cm.gray)
+            ax[2].imshow(im, cmap=plt.cm.gray, interpolation='nearest')
             #ax[2].set_title('output')
+        plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
         plt.show()
 
         # threshold comparison
         axs = plt.subplots(10, 3)[1]
         a = np.random.randint(0, len(batch))
         im = output[a][0].cpu().detach().numpy()
+        step = (((900-topMargin)-bottomMargin)/len(axs))
+        listT = np.arange(bottomMargin, 900 - topMargin, step)
         for index, ax in enumerate(axs):
             x0 = (X[a][0].numpy()*255).astype(np.uint8)
             y0 = (y[a].numpy()).astype(np.uint8)
             t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
-
-            t1 = r.randint(1 + bottomMargin, 900 - topMargin)
-            t2 = r.randint((t1-topMargin if t1 > (maxT-topMargin) else t1), maxT - topMargin)
-            t1 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t1
-            t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
+            t1 = listT[index]
+            t2 = listT[index]+bottomMargin
+            # random thresholds
+            #t1 = r.randint(bottomMargin, 900 - topMargin)
+            #t2 = r.randint((t1-topMargin if t1 > (maxT-topMargin) else t1), maxT - topMargin)
+            # show extremes
+            #t1 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t1
+            #t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
             y0 = cv.Canny(x0, t1, t2)
 
-            x0 = X[a][0].unsqueeze(0)
-            x0 = net(torch.cat([x0, torch.full(x0.shape, t1, dtype=torch.float), torch.full(x0.shape, t2, dtype=torch.float)]).unsqueeze(0).cuda())
-            x0 = x0[0][0].cpu().detach()
+            x1 = X[a][0].unsqueeze(0)
+            x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float), torch.full(x1.shape, t2, dtype=torch.float)]).unsqueeze(0).cuda()
+            x1 = net(x1)
+            x1 = x1[0][0].cpu().detach()
 
             ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
-            ax[0].imshow(x0, cmap=plt.cm.gray)
+            ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
             ax[0].set_title(str(t1) + '   and   ' + str(t2))
-            ax[1].imshow(y0, cmap=plt.cm.gray)
+            ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
             #ax[1].set_title('target')
-            ax[2].imshow(im, cmap=plt.cm.gray)
+            ax[2].imshow(x1, cmap=plt.cm.gray, interpolation='nearest')
             #ax[2].set_title('output')
+        plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
         plt.show()
 
 # visualize last output of network
@@ -424,6 +446,6 @@ axs = plt.subplots(2, 9)[1].ravel()
 for i, ax in enumerate(axs):
     ax.axis('off')
     im = output[i][0].cpu().detach().numpy()
-    ax.imshow(im, cmap=plt.cm.gray)
+    ax.imshow(im, cmap=plt.cm.gray, interpolation='nearest')
 plt.show()
 
