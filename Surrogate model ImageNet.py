@@ -21,7 +21,10 @@ import winsound
 
 ### temporary ###
 import os  # instead conda install nomkl
+
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+
 ### temporary ###
 
 
@@ -37,8 +40,8 @@ convAuto = partial(Conv2dAutoPad, kernel_size=3, bias=False)
 
 
 def conv_bn(in_channels, out_channels, conv, *args, **kwargs):
-    return nn.Sequential(OrderedDict({  'conv': conv(in_channels, out_channels, *args, **kwargs),
-                                        'bn': nn.BatchNorm2d(out_channels)
+    return nn.Sequential(OrderedDict({'conv': conv(in_channels, out_channels, *args, **kwargs),
+                                      'bn': nn.BatchNorm2d(out_channels)
                                       }))
 
 
@@ -87,18 +90,18 @@ class ResidualBottleNeckBlock(nn.Module):
             = in_channels, out_channels, expansion, downsampling, conv
 
         self.blocks = self.blocks = nn.Sequential(
-           conv_bn(self.in_channels, self.out_channels, self.conv, kernel_size=1),
-             nn.ReLU(inplace=True),
-             conv_bn(self.out_channels, self.out_channels, self.conv, kernel_size=3, stride=self.downsampling),
-             nn.ReLU(inplace=True),
-             conv_bn(self.out_channels, self.expanded_channels, self.conv, kernel_size=1),
+            conv_bn(self.in_channels, self.out_channels, self.conv, kernel_size=1),
+            nn.ReLU(inplace=True),
+            conv_bn(self.out_channels, self.out_channels, self.conv, kernel_size=3, stride=self.downsampling),
+            nn.ReLU(inplace=True),
+            conv_bn(self.out_channels, self.expanded_channels, self.conv, kernel_size=1),
         )
 
         self.shortcut = nn.Sequential(OrderedDict(
-            {   'conv': nn.Conv2d(self.in_channels, self.expanded_channels, kernel_size=1,
-                                  stride=self.downsampling, bias=False),
-                'bn': nn.BatchNorm2d(self.expanded_channels)
-            })) if self.should_apply_shortcut else None
+            {'conv': nn.Conv2d(self.in_channels, self.expanded_channels, kernel_size=1,
+                               stride=self.downsampling, bias=False),
+             'bn': nn.BatchNorm2d(self.expanded_channels)
+             })) if self.should_apply_shortcut else None
 
     def forward(self, x):
         residual = x
@@ -134,12 +137,12 @@ class ResNetLayer(nn.Module):
 
 # visualizing blocks
 
-#print(conv_bn(3, 3, nn.Conv2d, kernel_size=3))
-#print(ResidualBlock(32, 64))
+# print(conv_bn(3, 3, nn.Conv2d, kernel_size=3))
+# print(ResidualBlock(32, 64))
 
-#dummy = torch.ones((1, 64, 48, 48))
-#blo = ResNetLayer(64, 64, n=3, expansion=1)
-#print(blo(dummy).shape)
+# dummy = torch.ones((1, 64, 48, 48))
+# blo = ResNetLayer(64, 64, n=3, expansion=1)
+# print(blo(dummy).shape)
 
 
 class Net(nn.Module):
@@ -217,7 +220,6 @@ class Net(nn.Module):
         # print(thresholds[0])
         # h = torch.cat((h, thresholds[0].cuda().unsqueeze(dim=1)), dim=1)   # concatenate threshold tensor to current layer
         # h = h.reshape([s[0], s[1], s[2], s[3]])
-
         h = self.conv1(h)
         h = self.conv2(h)
 
@@ -235,6 +237,7 @@ class Net(nn.Module):
         h = self.deconv2(h)
         h = self.sConv1(h)
         h = self.sConv2(h)
+        #print("after network: ", h)
         return h
 
     def train(self, epoch):
@@ -243,7 +246,7 @@ class Net(nn.Module):
         x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
         tr_loss = 0
         x_train, y_train = autog.Variable(x_train), autog.Variable(y_train)
-        #x_val, y_val = autog.Variable(x_val), autog.Variable(y_val)
+        # x_val, y_val = autog.Variable(x_val), autog.Variable(y_val)
 
         x_train = x_train.float().cuda()
         y_train = y_train.float().cuda().unsqueeze(1)
@@ -282,31 +285,42 @@ class Net(nn.Module):
 
 class CannyDataset(Dataset):
 
-    def __init__(self, data, topMargin=0, bottomMargin=0, train=True, transform=None, target_transform=None,
+    def __init__(self, data, topMargin=0, bottomMargin=0, normalize=False, norm=None, tnorm=None,
                  download=False):
         self.data = data
         self.topMargin = topMargin
         self.bottomMargin = bottomMargin
+        self.norm = norm
+        self.tnorm = tnorm
+        self.normalize = normalize
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, index):
-        t1 = r.randint(1+self.bottomMargin, 900-self.topMargin)
-        t2 = r.randint(t1, 900-self.topMargin)
+        t1 = r.randint(1 + self.bottomMargin, 900 - self.topMargin)
+        t2 = r.randint(t1, 900 - self.topMargin)
         img = self.data[index][0]
 
         # convert image to UTF-8 numpy array for cv module
-        cvimg = (img[0].numpy()*255).astype(np.uint8)
+        cvimg = (img[0].numpy() * 255).astype(np.uint8)
 
         # create contour image (y)
-        target = torch.tensor(cv.Canny(cvimg, t1, t2))
+        target = torch.tensor(cv.Canny(cvimg, t1, t2).astype(float))
 
         # blurring input image
-        blurimg = torch.tensor(cv.GaussianBlur(cvimg, (3, 3), 0)).unsqueeze(0)
+        blurimg = torch.tensor(cv.GaussianBlur(cvimg, (5, 5), 0)).unsqueeze(0)
 
         # create input with image and thresholds as dimension
-        img = torch.cat([blurimg, torch.full(img.shape, t1, dtype=torch.float), torch.full(img.shape, t2, dtype=torch.float)])
+        img = torch.cat([blurimg
+                            , torch.full(img.shape, t1, dtype=torch.float)
+                            , torch.full(img.shape, t2, dtype=torch.float)
+                         ])
+        # normalize input imgae, threshold dimensions and target contour-image
+        if normalize:
+            img = norm(img)
+            target = tnorm(target.unsqueeze(0)).squeeze(0)
+
         return img, target
 
 
@@ -317,17 +331,20 @@ torch.cuda.empty_cache()
 ############# USER INTERFACE #############
 ##########################################
 
-# declare variables
-
-duplicates = 1  # optional
+duplicates = None   # optional
 batchsize = 14
 topMargin = 400
 bottomMargin = 150
 n_epochs = 10
-lr = 0.005
+lr = 0.001
 trained = 0
 continueTraining = 1
 printingClasses = True
+normalize = True
+
+##########################################
+############# USER INTERFACE #############
+##########################################
 
 #### additional declarations ####
 # path to save model
@@ -337,53 +354,55 @@ class_folder = r'C:\Users\dschm\PycharmProjects\ba_thesis\data\ImageNet\imagenet
 # lists to store loss
 train_losses, val_losses = [], []
 SSIM_train, SSIM_val = [], []
-maxT = 900      # DO NOT CHANGE (maximum Canny Threshold value, depends on function and dataset)
+maxT = 900  # DO NOT CHANGE (maximum Canny Threshold value, depends on function and dataset)
 
-##########################################
-############# USER INTERFACE #############
-##########################################
+# target normalization
+tnorm = tf.Normalize(mean=0., std=255.0)
+inv_norm = tf.Normalize(mean=-0., std=1/255.0)
 
-# LOADING DATASET
-# resize to smallest dimension first
+
+std = float(maxT - topMargin - bottomMargin)
+# image + thresholds normalization
+norm = tf.Normalize(mean=[0., bottomMargin, bottomMargin], std=[255.0, std, std])
+inv_input_norm = tf.Normalize(mean=np.negative([0., 0., 0.]), std=np.reciprocal([255.0, std, std]))
+
+
+                                    ##### LOADING DATASET #####
+
 ImageNet_data = \
     tv.datasets.ImageFolder(root='./data/ImageNet/imagenet_images'
-                                        , transform=tf.Compose([tf.transforms.Grayscale(1)
-                                                                , tf.Resize(256)
-                                                                , tf.CenterCrop(218)
-                                                                , tf.ToTensor()
-                                                                ])
-                                        , target_transform=None)
+                            , transform=tf.Compose([tf.transforms.Grayscale(1)
+                                                       , tf.Resize(256) # resize to smallest dimension first
+                                                       , tf.CenterCrop(218)
+                                                       , tf.ToTensor()
+                                                    ])
+                            , target_transform=None)
 
-'''
-print("done creating tensor")
-torch.save(data.clone(), 'data.pt')
-print("saved!")
-
-data = torch.load('data.pt')
-print('loaded!')
-ImageNet_data.data = data
-print(len(ImageNet_data.data))
-'''
-
-
-#for _ in range(1, duplicates):
-    #dataset2 = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
-    #dataset = torch.utils.data.ConcatDataset([dataset, dataset2])
+if duplicates:
+    for _ in range(1, duplicates):
+        oldLength = len(dataset)
+        print(f"adding {duplicates} duplicates to the dataset")
+        dataset2 = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
+        dataset = torch.utils.data.ConcatDataset([dataset, dataset2])
+        print(f"new length of dataset: {len(dataset)}  ##  (old length: {oldLength})")
 
 classes = createClassDict(class_folder, printingClasses)
-dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
+dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
+                       , normalize=normalize, norm=norm, tnorm=tnorm)
+# set shuffle true
 data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
-print('length of dataset: ', len(dataset), ' with number of duplicates: ', duplicates)
+
+
 
 # create network
 net = Net()
 optimizer = opt.AdamW(net.parameters(), lr=lr)
-criterion = nn.MSELoss()    # nn.L1 # hubert loss #BCE
+criterion = nn.MSELoss().cuda()  # SmoothL1Loss() #BCELoss()
 net = net.cuda()
 criterion = criterion.cuda()
 # visualizing architecture
-#print(summary(net, (3, 218, 178)))
-#render(net, path='data/graph_minimal')
+# print(summary(net, (3, 218, 178)))
+# render(net, path='data/graph_minimal')
 
 
 if trained or continueTraining:
@@ -392,12 +411,12 @@ if trained or continueTraining:
     net.load_state_dict(torch.load(PATH))
     net.eval()
 
-
 # training process, loops through epoch (and batch or data-entries)
 if not trained:
     print("training model")
     for epoch in range(n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
+        # set shuffle true
         data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
 
         # training with minibatch
@@ -412,7 +431,7 @@ if not trained:
     print("saved model")
     gc.collect()
     torch.cuda.empty_cache()
-    #winsound.PlaySound('RAN-D & VILLAIN - CORONA GO FCK YOURSELF.wav', winsound.SND_FILENAME)
+    # winsound.PlaySound('RAN-D & VILLAIN - CORONA GO FCK YOURSELF.wav', winsound.SND_FILENAME)
     winsound.Beep(500, 1000)
 
     axs = plt.subplots(2, 1)[1].ravel()
@@ -429,16 +448,20 @@ if not trained:
     axs[1].legend()
     plt.show()
 
-
 # visualize sample of X and y
 print("visualizing  output")
 for i, batch in enumerate(data_loader):
     if i == 0:  # (len(data_loader)-1)
         X, y = batch[0:20]
         x_show = X[0:20].float().cuda()
-        y_show = y[0:20].float().cuda().unsqueeze(1)
+        y_show = y[0:20].float().cuda()
         output = net(x_show)
 
+        print("before: ", output[0])
+        # invert normalization
+        x_show, y_show = [inv_input_norm(x) for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0) for y in y_show]
+        output = [inv_norm(out) for out in output]
+        print("after: ", output[0])
         axs = plt.subplots(6, 3)[1]
         # image comparison plot
         for a, ax in enumerate(axs):
@@ -451,44 +474,47 @@ for i, batch in enumerate(data_loader):
             ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
             ax[0].set_title('Thresholds: ' + str(t1) + ' and ' + str(t2))
             ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
-            #ax[1].set_title('target')
+            # ax[1].set_title('target')
             ax[2].imshow(im, cmap=plt.cm.gray, interpolation='nearest')
-            #ax[2].set_title('output')
+            # ax[2].set_title('output')
         plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
         plt.show()
 
         # threshold comparison
         axs = plt.subplots(10, 3)[1]
-        a = np.random.randint(0, len(batch))
+        a = np.random.randint(0, len(X))
         im = output[a][0].cpu().detach().numpy()
-        step = (((900-topMargin)-bottomMargin)/len(axs))
+        step = (((900 - topMargin) - bottomMargin) / len(axs))
         listT = np.arange(bottomMargin, 900 - topMargin, step)
+
         for index, ax in enumerate(axs):
             x0 = (X[a][0].numpy()).astype(np.uint8)
             y0 = (y[a].numpy()).astype(np.uint8)
             t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
             t1 = listT[index]
-            t2 = listT[index]+bottomMargin
+            t2 = listT[index] + bottomMargin
             # random thresholds
-            #t1 = r.randint(bottomMargin, 900 - topMargin)
-            #t2 = r.randint((t1-topMargin if t1 > (maxT-topMargin) else t1), maxT - topMargin)
+            # t1 = r.randint(bottomMargin, 900 - topMargin)
+            # t2 = r.randint((t1-topMargin if t1 > (maxT-topMargin) else t1), maxT - topMargin)
             # show extremes
-            #t1 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t1
-            #t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
+            # t1 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t1
+            # t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
             y0 = cv.Canny(x0, t1, t2)
 
             x1 = X[a][0].unsqueeze(0)
-            x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float), torch.full(x1.shape, t2, dtype=torch.float)]).unsqueeze(0).cuda()
+            x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float),
+                            torch.full(x1.shape, t2, dtype=torch.float)]).unsqueeze(0).cuda()
             x1 = net(x1)
-            x1 = x1[0][0].cpu().detach()
+            x1 = inv_norm(x1.squeeze(0))
+            x1 = x1[0].cpu().detach()
 
             ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
             ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
             ax[0].set_title(str(t1) + '   and   ' + str(t2))
             ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
-            #ax[1].set_title('target')
+            # ax[1].set_title('target')
             ax[2].imshow(x1, cmap=plt.cm.gray, interpolation='nearest')
-            #ax[2].set_title('output')
+            # ax[2].set_title('output')
         plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
         plt.show()
 
@@ -499,4 +525,3 @@ for i, ax in enumerate(axs):
     im = output[i][0].cpu().detach().numpy()
     ax.imshow(im, cmap=plt.cm.gray, interpolation='nearest')
 plt.show()
-
