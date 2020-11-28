@@ -62,6 +62,9 @@ def render(net, path):
     directory, file_name = os.path.split(path)
     Viz.render(file_name, directory=directory, cleanup=True, format='png')
 
+def cuda_np(tensor):
+    return tensor.cpu().detach().numpy()
+
 
 def createClassDict(class_folder, printingClasses=True):
     # create dictionary for classes
@@ -309,7 +312,7 @@ class CannyDataset(Dataset):
         target = torch.tensor(cv.Canny(cvimg, t1, t2).astype(float))
 
         # blurring input image
-        blurimg = torch.tensor(cv.GaussianBlur(cvimg, (5, 5), 0)).unsqueeze(0)
+        blurimg = torch.tensor(cv.GaussianBlur(cvimg, (3, 3), 0)).unsqueeze(0)
 
         # create input with image and thresholds as dimension
         img = torch.cat([blurimg
@@ -338,7 +341,7 @@ bottomMargin = 150
 n_epochs = 10
 lr = 0.001
 trained = 0
-continueTraining = 1
+continueTraining = 0
 printingClasses = True
 normalize = True
 
@@ -372,7 +375,7 @@ inv_input_norm = tf.Normalize(mean=np.negative([0., 0., 0.]), std=np.reciprocal(
 ImageNet_data = \
     tv.datasets.ImageFolder(root='./data/ImageNet/imagenet_images'
                             , transform=tf.Compose([tf.transforms.Grayscale(1)
-                                                       , tf.Resize(256) # resize to smallest dimension first
+                                                       , tf.Resize(256)     # resize to smallest dimension first
                                                        , tf.CenterCrop(218)
                                                        , tf.ToTensor()
                                                     ])
@@ -457,18 +460,16 @@ for i, batch in enumerate(data_loader):
         y_show = y[0:20].float().cuda()
         output = net(x_show)
 
-        print("before: ", output[0])
         # invert normalization
         x_show, y_show = [inv_input_norm(x) for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0) for y in y_show]
         output = [inv_norm(out) for out in output]
-        print("after: ", output[0])
         axs = plt.subplots(6, 3)[1]
         # image comparison plot
         for a, ax in enumerate(axs):
-            im = output[a][0].cpu().detach().numpy()
-            x0 = (X[a][0].numpy()).astype(np.uint8)
-            y0 = (y[a].numpy()).astype(np.uint8)
-            t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
+            im = cuda_np(output[a][0])
+            x0 = (cuda_np(x_show[a][0])).astype(np.uint8)
+            y0 = (cuda_np(y_show[a])).astype(np.uint8)
+            t1, t2 = int(cuda_np(x_show[a][1][0][0])), int(cuda_np(x_show[a][2][0][0]))
 
             ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
             ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
@@ -483,14 +484,13 @@ for i, batch in enumerate(data_loader):
         # threshold comparison
         axs = plt.subplots(10, 3)[1]
         a = np.random.randint(0, len(X))
-        im = output[a][0].cpu().detach().numpy()
         step = (((900 - topMargin) - bottomMargin) / len(axs))
         listT = np.arange(bottomMargin, 900 - topMargin, step)
 
         for index, ax in enumerate(axs):
-            x0 = (X[a][0].numpy()).astype(np.uint8)
-            y0 = (y[a].numpy()).astype(np.uint8)
-            t1, t2 = int(X[a][1][0][0].numpy()), int(X[a][2][0][0].numpy())
+            x0 = (cuda_np(x_show[a][0])).astype(np.uint8)
+            y0 = (cuda_np(y_show[a])).astype(np.uint8)
+            t1, t2 = int(X[a][1][0][0]), int(X[a][2][0][0].numpy())
             t1 = listT[index]
             t2 = listT[index] + bottomMargin
             # random thresholds
@@ -501,12 +501,12 @@ for i, batch in enumerate(data_loader):
             # t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
             y0 = cv.Canny(x0, t1, t2)
 
-            x1 = X[a][0].unsqueeze(0)
-            x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float),
-                            torch.full(x1.shape, t2, dtype=torch.float)]).unsqueeze(0).cuda()
+            x1 = x_show[a][0].unsqueeze(0)
+            x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float, device="cuda"),
+                            torch.full(x1.shape, t2, dtype=torch.float, device="cuda")]).unsqueeze(0).cuda()
             x1 = net(x1)
             x1 = inv_norm(x1.squeeze(0))
-            x1 = x1[0].cpu().detach()
+            x1 = cuda_np(x1[0])
 
             ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
             ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
