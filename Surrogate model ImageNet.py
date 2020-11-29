@@ -18,12 +18,13 @@ import piq
 from typing import Union, Tuple
 import hiddenlayer as hl
 import winsound
+import os
 
 ### temporary ###
-import os  # instead conda install nomkl
 
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+#os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"    #instead conda install nomkl
 
+#os.environ['CUDA_LAUNCH_BLOCKING'] = "1"       #debug cuda errors
 
 ### temporary ###
 
@@ -149,8 +150,9 @@ class ResNetLayer(nn.Module):
 
 
 class Net(nn.Module):
-    def __init__(self):
+    def __init__(self, BCEL=False):
         super(Net, self).__init__()
+        self.BCEL = BCEL    # option to enable sigmoid layer for Binary Cross Entropy Loss
 
         self.conv1 = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=9, stride=1, padding=4),
@@ -217,12 +219,10 @@ class Net(nn.Module):
             nn.ReLU(inplace=True),
         )
 
+        self.sigmoid = nn.Sigmoid()
+
     def forward(self, h):
-        # s = h.shape
-        # print(s)
-        # print(thresholds[0])
-        # h = torch.cat((h, thresholds[0].cuda().unsqueeze(dim=1)), dim=1)   # concatenate threshold tensor to current layer
-        # h = h.reshape([s[0], s[1], s[2], s[3]])
+
         h = self.conv1(h)
         h = self.conv2(h)
 
@@ -240,7 +240,9 @@ class Net(nn.Module):
         h = self.deconv2(h)
         h = self.sConv1(h)
         h = self.sConv2(h)
-        #print("after network: ", h)
+
+        #if self.BCEL:
+            #h = self.sigmoid(h)
         return h
 
     def train(self, epoch):
@@ -270,14 +272,14 @@ class Net(nn.Module):
         loss_train = criterion(output_train, y_train)
         with torch.no_grad():
             loss_val = criterion(output_val, y_val)
-        train_losses.append(loss_train.cpu().detach().numpy())
-        val_losses.append(loss_val.cpu().detach().numpy())
+        train_losses.append(cuda_np(loss_train))
+        val_losses.append(cuda_np(loss_val))
 
         # SSIM loss
         ssim_train = piq.ssim(output_train, y_train, data_range=1.)
         ssim_val = piq.ssim(output_val, y_val, data_range=1.)
-        SSIM_train.append(ssim_train.cpu().detach().numpy())
-        SSIM_val.append(ssim_val.cpu().detach().numpy())
+        SSIM_train.append(cuda_np(ssim_train))
+        SSIM_val.append(cuda_np(ssim_val))
 
         # computing the updated weights of all the model parameters
         loss_train.backward()
@@ -339,11 +341,12 @@ batchsize = 14
 topMargin = 400
 bottomMargin = 150
 n_epochs = 10
-lr = 0.001
-trained = 0
+lr = 0.005
+trained = 1
 continueTraining = 0
 printingClasses = True
 normalize = True
+BCEL = True
 
 ##########################################
 ############# USER INTERFACE #############
@@ -398,11 +401,16 @@ data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last
 
 
 # create network
+
+if BCEL:
+    criterion = nn.BCEWithLogitsLoss().cuda()
+else:
+    criterion = nn.MSELoss().cuda()  # nn.SmoothL1Loss().cuda()
+
 net = Net()
 optimizer = opt.AdamW(net.parameters(), lr=lr)
-criterion = nn.MSELoss().cuda()  # SmoothL1Loss() #BCELoss()
 net = net.cuda()
-criterion = criterion.cuda()
+
 # visualizing architecture
 # print(summary(net, (3, 218, 178)))
 # render(net, path='data/graph_minimal')
@@ -460,9 +468,12 @@ for i, batch in enumerate(data_loader):
         y_show = y[0:20].float().cuda()
         output = net(x_show)
 
+        print(output[0][0][0])
         # invert normalization
         x_show, y_show = [inv_input_norm(x) for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0) for y in y_show]
         output = [inv_norm(out) for out in output]
+        print(output[0][0][0])
+        bla
         axs = plt.subplots(6, 3)[1]
         # image comparison plot
         for a, ax in enumerate(axs):
