@@ -288,7 +288,7 @@ class Net(nn.Module):
 
 class CannyDataset(Dataset):
 
-    def __init__(self, data, topMargin=0, bottomMargin=0, normalize=False, norm=None, tnorm=None,
+    def __init__(self, data, topMargin=0, bottomMargin=0, normalize=False, norm=None, tnorm=None, blur=0,
                  download=False):
         self.data = data
         self.topMargin = topMargin
@@ -296,6 +296,7 @@ class CannyDataset(Dataset):
         self.norm = norm
         self.tnorm = tnorm
         self.normalize = normalize
+        self.blur = blur
 
     def __len__(self):
         return len(self.data)
@@ -312,7 +313,7 @@ class CannyDataset(Dataset):
         target = torch.tensor(cv.Canny(cvimg, t1, t2).astype(float))
 
         # blurring input image
-        blurimg = torch.tensor(cv.GaussianBlur(cvimg, (3, 3), 0)).unsqueeze(0)
+        blurimg = torch.tensor(cv.GaussianBlur(cvimg, (blur, blur), 0)).unsqueeze(0)
 
         # create input with image and thresholds as dimension
         img = torch.cat([blurimg
@@ -338,11 +339,13 @@ duplicates = None   # optional
 batchsize = 14
 topMargin = 400
 bottomMargin = 150
-n_epochs = 7
-lr = 0.005
+blur = 5
+n_epochs = 10
+lr = 0.0025
 trained = 0
 train_valid = False
 continueTraining = 1
+saving = False
 printingClasses = True
 normalize = True
 BCEL = False
@@ -393,7 +396,7 @@ if duplicates:
 
 classes = createClassDict(class_folder, printingClasses)
 dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
-                       , normalize=normalize, norm=norm, tnorm=tnorm)
+                       , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur)
 # set shuffle true
 data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
 
@@ -415,7 +418,8 @@ net = net.cuda()
 # render(net, path='data/graph_minimal')
 
 
-
+parameters = f"{n_epochs}eps_lr{lr}{'_norm' if normalize else ''}_{blur}blur_topM{topMargin}_lowM{bottomMargin}_"
+print("parameters: ", parameters)
 
 if trained or continueTraining:
     # Load model
@@ -438,6 +442,7 @@ if not trained:
             print('Epoch : ', epoch + 1, '\t')  # , 'loss :', loss_val)
     # Save model
     print("saving model")
+    PATH = parameters + PATH if saving else PATH
     torch.save(net.state_dict(), PATH)
     print("saved model")
     gc.collect()
