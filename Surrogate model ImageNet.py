@@ -22,7 +22,7 @@ import os
 
 ### temporary ###
 
-#os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"    #instead conda install nomkl
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"    #instead conda install nomkl
 
 #os.environ['CUDA_LAUNCH_BLOCKING'] = "1"       #debug cuda errors
 
@@ -79,9 +79,9 @@ def createClassDict(class_folder, printingClasses=True):
             i += 1
 
     if printingClasses:
-        print('Name Age')
-        for name, age in classes.items():
-            print('{} {}'.format(name, age))
+        print('ID Class')
+        for id, name in classes.items():
+            print('{} {}'.format(id, name))
 
     return classes
 
@@ -219,8 +219,6 @@ class Net(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        self.sigmoid = nn.Sigmoid()
-
     def forward(self, h):
 
         h = self.conv1(h)
@@ -340,13 +338,14 @@ duplicates = None   # optional
 batchsize = 14
 topMargin = 400
 bottomMargin = 150
-n_epochs = 10
+n_epochs = 7
 lr = 0.005
-trained = 1
-continueTraining = 0
+trained = 0
+train_valid = False
+continueTraining = 1
 printingClasses = True
 normalize = True
-BCEL = True
+BCEL = False
 
 ##########################################
 ############# USER INTERFACE #############
@@ -396,7 +395,7 @@ classes = createClassDict(class_folder, printingClasses)
 dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
                        , normalize=normalize, norm=norm, tnorm=tnorm)
 # set shuffle true
-data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
+data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
 
 
 
@@ -416,6 +415,8 @@ net = net.cuda()
 # render(net, path='data/graph_minimal')
 
 
+
+
 if trained or continueTraining:
     # Load model
     print("loading model")
@@ -427,8 +428,7 @@ if not trained:
     print("training model")
     for epoch in range(n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
-        # set shuffle true
-        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
+        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)  # set shuffle true
 
         # training with minibatch
         for i, batch in enumerate(data_loader):
@@ -468,12 +468,12 @@ for i, batch in enumerate(data_loader):
         y_show = y[0:20].float().cuda()
         output = net(x_show)
 
-        print(output[0][0][0])
+        #print(output[0][0])
         # invert normalization
-        x_show, y_show = [inv_input_norm(x) for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0) for y in y_show]
-        output = [inv_norm(out) for out in output]
-        print(output[0][0][0])
-        bla
+        x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
+        output = [inv_norm(out).int() for out in output]
+        #print(output[0][0])
+
         axs = plt.subplots(6, 3)[1]
         # image comparison plot
         for a, ax in enumerate(axs):
