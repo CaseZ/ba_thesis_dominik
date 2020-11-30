@@ -340,9 +340,9 @@ batchsize = 14
 topMargin = 400
 bottomMargin = 150
 blur = 5
-n_epochs = 10
+n_epochs = 2
 lr = 0.0025
-trained = 0
+trained = 1
 train_valid = False
 continueTraining = 1
 saving = False
@@ -359,6 +359,7 @@ BCEL = False
 PATH = "state_dict_model_latest.pt"
 # path of image folders (folder name = class name)
 class_folder = r'C:\Users\dschm\PycharmProjects\ba_thesis\data\ImageNet\imagenet_images'
+img_folder = r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\_'
 # lists to store loss
 train_losses, val_losses = [], []
 SSIM_train, SSIM_val = [], []
@@ -401,6 +402,33 @@ dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMa
 data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
 
 
+                            ##### LOADING VALIDATION MODEL #####
+resnet152 = tv.models.resnet152()
+resnet152.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+
+if train_valid:
+    print("training validation model")
+    for epoch in range(n_epochs):
+        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
+        # set shuffle true
+        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
+
+        # training with minibatch
+        for i, batch in enumerate(data_loader):
+            X, y = batch
+            output = resnet152.train(epoch)
+        if epoch % 2 == 0:
+            print('Epoch : ', epoch + 1, '\t')  # , 'loss :', loss_val)
+    # Save model
+    print("saving validation model")
+    torch.save(resnet152.state_dict(), PATH)
+    print("saved validation model")
+    gc.collect()
+    torch.cuda.empty_cache()
+    winsound.Beep(500, 1000)
+
+
+                            ###### END VALIDATION MODEL ######
 
 # create network
 
@@ -418,7 +446,7 @@ net = net.cuda()
 # render(net, path='data/graph_minimal')
 
 
-parameters = f"{n_epochs}eps_lr{lr}{'_norm' if normalize else ''}_{blur}blur_topM{topMargin}_lowM{bottomMargin}_"
+parameters = f"{n_epochs}eps_lr{lr}{'_norm' if normalize else ''}_{blur}blur_topM{topMargin}_lowM{bottomMargin}"
 print("parameters: ", parameters)
 
 if trained or continueTraining:
@@ -442,7 +470,7 @@ if not trained:
             print('Epoch : ', epoch + 1, '\t')  # , 'loss :', loss_val)
     # Save model
     print("saving model")
-    PATH = parameters + PATH if saving else PATH
+    PATH = parameters + "_" +PATH if saving else PATH
     torch.save(net.state_dict(), PATH)
     print("saved model")
     gc.collect()
@@ -462,7 +490,7 @@ if not trained:
     axs[1].plot(SSIM_val, label='Validation SSIM', alpha=0.6)
     axs[1].set_xlabel('batches')
     axs[1].legend()
-    plt.show()
+    plt.savefig((img_folder + "loss_" + parameters), format='jpg', dpi='figure')
 
 # visualize sample of X and y
 print("visualizing  output")
@@ -495,7 +523,7 @@ for i, batch in enumerate(data_loader):
             ax[2].imshow(im, cmap=plt.cm.gray, interpolation='nearest')
             # ax[2].set_title('output')
         plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
-        plt.show()
+        plt.savefig((img_folder + "comparison_"+parameters), format='png')
 
         # threshold comparison
         axs = plt.subplots(10, 3)[1]
@@ -532,7 +560,7 @@ for i, batch in enumerate(data_loader):
             ax[2].imshow(x1, cmap=plt.cm.gray, interpolation='nearest')
             # ax[2].set_title('output')
         plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
-        plt.show()
+        plt.savefig((img_folder + "comparison_thresholds_"+parameters), format='png')
 
 # visualize last output of network
 axs = plt.subplots(2, 7)[1].ravel()
