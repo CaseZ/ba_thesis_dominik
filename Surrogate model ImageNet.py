@@ -372,7 +372,6 @@ show = False    # show or save plots
 
 #### additional declarations ####
 # path to save model
-oldmodel = "20eps_lr0.0025_norm_5blur_topM400_lowM150_67m9s_state_dict_model_latest.pt"
 PATH = "state_dict_model_latest.pt"
 # path of image folders (folder name = class name)
 class_folder = r'C:\Users\dschm\PycharmProjects\ba_thesis\data\ImageNet\imagenet_images'
@@ -558,8 +557,6 @@ if train_valid:
     saveimg("valmodel_loss_", show)
 
 
-# https://pytorch.org/tutorials/beginner/finetuning_torchvision_models_tutorial.html
-
 ################################## VISUALIZING ##################################
 
 print("visualizing  output")
@@ -643,6 +640,7 @@ for i, ax in enumerate(axs):
 plt.show()
 '''
 
+# save txt and shutdown
 '''
 print(" ## WARNING ## \n ---- shutting down in 5 minutes ---- \n ## WARNING ##")
 os.system("shutdown /s /t 300");
