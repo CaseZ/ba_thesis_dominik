@@ -10,6 +10,8 @@ import torch.optim as opt
 import torch.autograd as autog
 import torchvision as tv
 import gc
+
+from torch.optim import lr_scheduler
 from torchvision import transforms as tf
 from torch.utils.data import Dataset, DataLoader
 from functools import partial
@@ -19,13 +21,14 @@ from typing import Union, Tuple
 import hiddenlayer as hl
 import winsound
 import os
+import time
+import sys
+
+#sys.stdout = open(r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\console.txt', 'w')
 
 ### temporary ###
-
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"    #instead conda install nomkl
-
 #os.environ['CUDA_LAUNCH_BLOCKING'] = "1"       #debug cuda errors
-
 ### temporary ###
 
 
@@ -62,6 +65,14 @@ def render(net, path):
     Viz.attr(rankdir="TB")
     directory, file_name = os.path.split(path)
     Viz.render(file_name, directory=directory, cleanup=True, format='png')
+
+
+def saveimg(name, show):
+    if show:
+        plt.show()
+    else:
+        plt.savefig((img_folder + name + parameters + ".png"), dpi=250, bbox_inches='tight')
+
 
 def cuda_np(tensor):
     return tensor.cpu().detach().numpy()
@@ -239,17 +250,14 @@ class Net(nn.Module):
         h = self.sConv1(h)
         h = self.sConv2(h)
 
-        #if self.BCEL:
-            #h = self.sigmoid(h)
         return h
 
-    def train(self, epoch):
-        if epoch == False:
+    def train_net(self, epoch):
+        if epoch == None:
+            print(" --- WARNING : not training because epoch is None --- ")
             return []
         x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
-        tr_loss = 0
         x_train, y_train = autog.Variable(x_train), autog.Variable(y_train)
-        # x_val, y_val = autog.Variable(x_val), autog.Variable(y_val)
 
         x_train = x_train.float().cuda()
         y_train = y_train.float().cuda().unsqueeze(1)
@@ -282,8 +290,7 @@ class Net(nn.Module):
         # computing the updated weights of all the model parameters
         loss_train.backward()
         optimizer.step()
-        tr_loss += loss_train.item()
-        return output_train
+        return output_train, loss_train.item()
 
 
 class CannyDataset(Dataset):
@@ -305,6 +312,7 @@ class CannyDataset(Dataset):
         t1 = r.randint(1 + self.bottomMargin, 900 - self.topMargin)
         t2 = r.randint(t1, 900 - self.topMargin)
         img = self.data[index][0]
+        id = self.data[index][1]
 
         # convert image to UTF-8 numpy array for cv module
         cvimg = (img[0].numpy() * 255).astype(np.uint8)
@@ -325,7 +333,7 @@ class CannyDataset(Dataset):
             img = norm(img)
             target = tnorm(target.unsqueeze(0)).squeeze(0)
 
-        return img, target
+        return img, target, id
 
 
 gc.collect()
@@ -340,43 +348,51 @@ batchsize = 14
 topMargin = 400
 bottomMargin = 150
 blur = 5
-n_epochs = 2
+n_epochs = 10    # for training session
+total_eps = 10  # total episodes for saving
 lr = 0.0025
-trained = 1
+
+trained = 0
+continueTraining = 0
+
 train_valid = False
-continueTraining = 1
-saving = False
-printingClasses = True
+continueVal = False
+
+saving = False      # saving model with parameters as name
+printingClasses = False
 normalize = True
 BCEL = False
+show = False    # show or save plots
+
 
 ##########################################
 ############# USER INTERFACE #############
 ##########################################
 
+
 #### additional declarations ####
 # path to save model
+oldmodel = "20eps_lr0.0025_norm_5blur_topM400_lowM150_67m9s_state_dict_model_latest.pt"
 PATH = "state_dict_model_latest.pt"
 # path of image folders (folder name = class name)
 class_folder = r'C:\Users\dschm\PycharmProjects\ba_thesis\data\ImageNet\imagenet_images'
 img_folder = r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\_'
-# lists to store loss
-train_losses, val_losses = [], []
+train_losses, val_losses, vloss = [], [], []
 SSIM_train, SSIM_val = [], []
 maxT = 900  # DO NOT CHANGE (maximum Canny Threshold value, depends on function and dataset)
 
-# target normalization
+################################# NORMALIZATION #################################
+
+# targets
 tnorm = tf.Normalize(mean=0., std=255.0)
 inv_norm = tf.Normalize(mean=-0., std=1/255.0)
 
-
 std = float(maxT - topMargin - bottomMargin)
-# image + thresholds normalization
+# image + thresholds
 norm = tf.Normalize(mean=[0., bottomMargin, bottomMargin], std=[255.0, std, std])
 inv_input_norm = tf.Normalize(mean=np.negative([0., 0., 0.]), std=np.reciprocal([255.0, std, std]))
 
-
-                                    ##### LOADING DATASET #####
+################################# DATASET #################################
 
 ImageNet_data = \
     tv.datasets.ImageFolder(root='./data/ImageNet/imagenet_images'
@@ -398,37 +414,10 @@ if duplicates:
 classes = createClassDict(class_folder, printingClasses)
 dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
                        , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur)
-# set shuffle true
 data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
 
 
-                            ##### LOADING VALIDATION MODEL #####
-resnet152 = tv.models.resnet152()
-resnet152.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-
-if train_valid:
-    print("training validation model")
-    for epoch in range(n_epochs):
-        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
-        # set shuffle true
-        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=False, drop_last=True)
-
-        # training with minibatch
-        for i, batch in enumerate(data_loader):
-            X, y = batch
-            output = resnet152.train(epoch)
-        if epoch % 2 == 0:
-            print('Epoch : ', epoch + 1, '\t')  # , 'loss :', loss_val)
-    # Save model
-    print("saving validation model")
-    torch.save(resnet152.state_dict(), PATH)
-    print("saved validation model")
-    gc.collect()
-    torch.cuda.empty_cache()
-    winsound.Beep(500, 1000)
-
-
-                            ###### END VALIDATION MODEL ######
+################################## SURROGATE MODEL ##################################
 
 # create network
 
@@ -446,8 +435,11 @@ net = net.cuda()
 # render(net, path='data/graph_minimal')
 
 
-parameters = f"{n_epochs}eps_lr{lr}{'_norm' if normalize else ''}_{blur}blur_topM{topMargin}_lowM{bottomMargin}"
+parameters = f"{total_eps}eps_lr{lr}{'_norm' if normalize else ''}_{blur}blur_topM{topMargin}_lowM{bottomMargin}"
 print("parameters: ", parameters)
+
+
+################################## TRAINING ##################################
 
 if trained or continueTraining:
     # Load model
@@ -455,27 +447,30 @@ if trained or continueTraining:
     net.load_state_dict(torch.load(PATH))
     net.eval()
 
-# training process, loops through epoch (and batch or data-entries)
 if not trained:
     print("training model")
+    t_start = time.time()
     for epoch in range(n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
         data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)  # set shuffle true
 
-        # training with minibatch
         for i, batch in enumerate(data_loader):
-            X, y = batch
-            output = net.train(epoch)
+            X, y, _ = batch
+            output, loss = net.train_net(epoch)
         if epoch % 2 == 0:
-            print('Epoch : ', epoch + 1, '\t')  # , 'loss :', loss_val)
+            t_end = time.time() - t_start  # training time
+            t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
+            print(f'Epoch : { epoch + 1} \t Loss : {loss:.4f} \t Time :  {t_string}')
+
     # Save model
     print("saving model")
-    PATH = parameters + "_" +PATH if saving else PATH
+    t_end = time.time() - t_start   # training time
+    t_string = "_" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s_"
+    PATH = parameters + t_string + PATH if saving else PATH
     torch.save(net.state_dict(), PATH)
     print("saved model")
     gc.collect()
     torch.cuda.empty_cache()
-    # winsound.PlaySound('RAN-D & VILLAIN - CORONA GO FCK YOURSELF.wav', winsound.SND_FILENAME)
     winsound.Beep(500, 1000)
 
     axs = plt.subplots(2, 1)[1].ravel()
@@ -490,82 +485,168 @@ if not trained:
     axs[1].plot(SSIM_val, label='Validation SSIM', alpha=0.6)
     axs[1].set_xlabel('batches')
     axs[1].legend()
-    plt.savefig((img_folder + "loss_" + parameters), format='jpg', dpi='figure')
+    plt.subplots_adjust(top=1.0)
+    saveimg("loss_", show)
 
-# visualize sample of X and y
+
+################################# VALIDATION MODEL #################################
+
+resnet152 = tv.models.resnet152()
+resnet152.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+resnet152.fc = nn.Linear(in_features=2048, out_features=len(classes), bias=True)
+resnet152 = resnet152.cuda()
+criterion = nn.CrossEntropyLoss().cuda()
+optimizer2 = opt.SGD(resnet152.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
+scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=0, verbose=True)
+
+# visualizing architecture
+# print(summary(resnet152, (1, 218, 178)))
+# render(net, path='data/graph_minimal')
+
+if continueVal:
+    # Load model
+    print("loading validation model")
+    resnet152.load_state_dict(torch.load("validation_" + PATH))
+
+if train_valid:
+    print("training validation model")
+    t = time.time()
+    for epoch in range(n_epochs):
+        scheduler.step()
+        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
+        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
+
+        for i, batch in enumerate(data_loader):
+            X, _, z = batch
+            X, y = net(X.cuda()), z.cuda()
+            X, y = autog.Variable(X), autog.Variable(y)
+            resnet152.trainnet()
+
+            optimizer2.zero_grad()
+            output = resnet152(X)
+            loss = criterion(output, y)
+
+            vloss.append(loss.item())
+            loss.backward()
+            optimizer2.step()
+
+        if epoch % 2 == 0:
+            t_end = time.time() - t  # training time
+            t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
+            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Time :  {t_string}')
+
+        output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()    #extract class labels
+        print(f"output : {cuda_np(output).astype(np.int)}")
+        print(f"target : {cuda_np(y)}")
+        print("--------------------------------------")
+
+    # Save model
+    print("saving validation model")
+    torch.save(resnet152.state_dict(), "validation_" + PATH)
+    print("saved validation model")
+    t_end = time.time() - t   # training time
+    t_string = "_" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s_"
+    gc.collect()
+    torch.cuda.empty_cache()
+    winsound.Beep(500, 1000)
+
+    # plot loss
+    plt.plot(vloss, label='Training loss', alpha=0.3)
+    #axs[0].plot(val_losses, label='Validation loss', alpha=0.6)
+    plt.xlabel('batches')
+    plt.legend()
+    saveimg("valmodel_loss_", show)
+
+
+# https://pytorch.org/tutorials/beginner/finetuning_torchvision_models_tutorial.html
+
+################################## VISUALIZING ##################################
+
 print("visualizing  output")
-for i, batch in enumerate(data_loader):
-    if i == 0:  # (len(data_loader)-1)
-        X, y = batch[0:20]
-        x_show = X[0:20].float().cuda()
-        y_show = y[0:20].float().cuda()
-        output = net(x_show)
+if saving or not train_valid:
+    for i, batch in enumerate(data_loader):
+        if i == 0:  # (len(data_loader)-1)
+            X, y, _ = batch[0:20]
+            x_show = X[0:20].cuda()     #.float() ?
+            y_show = y[0:20].cuda()     #.float() ?
+            output = net(x_show)
 
-        #print(output[0][0])
-        # invert normalization
-        x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
-        output = [inv_norm(out).int() for out in output]
-        #print(output[0][0])
+            #print(output[0][0])
+            # invert normalization
+            x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
+            output = [inv_norm(out).int() for out in output]
+            #print(output[0][0])
 
-        axs = plt.subplots(6, 3)[1]
-        # image comparison plot
-        for a, ax in enumerate(axs):
-            im = cuda_np(output[a][0])
-            x0 = (cuda_np(x_show[a][0])).astype(np.uint8)
-            y0 = (cuda_np(y_show[a])).astype(np.uint8)
-            t1, t2 = int(cuda_np(x_show[a][1][0][0])), int(cuda_np(x_show[a][2][0][0]))
+            axs = plt.subplots(6, 3)[1]
+            # image comparison plot
+            for a, ax in enumerate(axs):
+                im = cuda_np(output[a][0])
+                x0 = (cuda_np(x_show[a][0])).astype(np.uint8)
+                y0 = (cuda_np(y_show[a])).astype(np.uint8)
+                t1, t2 = int(cuda_np(x_show[a][1][0][0])), int(cuda_np(x_show[a][2][0][0]))
 
-            ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
-            ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
-            ax[0].set_title('Thresholds: ' + str(t1) + ' and ' + str(t2))
-            ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
-            # ax[1].set_title('target')
-            ax[2].imshow(im, cmap=plt.cm.gray, interpolation='nearest')
-            # ax[2].set_title('output')
-        plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
-        plt.savefig((img_folder + "comparison_"+parameters), format='png')
+                ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
+                ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
+                ax[0].set_title('Thresholds: ' + str(t1) + ' and ' + str(t2))
+                ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
+                # ax[1].set_title('target')
+                ax[2].imshow(im, cmap=plt.cm.gray, interpolation='nearest')
+                # ax[2].set_title('output')
+            plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
+            saveimg("comparison_", show)
 
-        # threshold comparison
-        axs = plt.subplots(10, 3)[1]
-        a = np.random.randint(0, len(X))
-        step = (((900 - topMargin) - bottomMargin) / len(axs))
-        listT = np.arange(bottomMargin, 900 - topMargin, step)
 
-        for index, ax in enumerate(axs):
-            x0 = (cuda_np(x_show[a][0])).astype(np.uint8)
-            y0 = (cuda_np(y_show[a])).astype(np.uint8)
-            t1, t2 = int(X[a][1][0][0]), int(X[a][2][0][0].numpy())
-            t1 = listT[index]
-            t2 = listT[index] + bottomMargin
-            # random thresholds
-            # t1 = r.randint(bottomMargin, 900 - topMargin)
-            # t2 = r.randint((t1-topMargin if t1 > (maxT-topMargin) else t1), maxT - topMargin)
-            # show extremes
-            # t1 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t1
-            # t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
-            y0 = cv.Canny(x0, t1, t2)
+            # threshold comparison
+            axs = plt.subplots(10, 3)[1]
+            a = np.random.randint(0, len(X))
+            step = (((900 - topMargin) - bottomMargin) / len(axs))
+            listT = np.arange(bottomMargin, 900 - topMargin, step)
+            for index, ax in enumerate(axs):
+                x0 = (cuda_np(x_show[a][0])).astype(np.uint8)
+                y0 = (cuda_np(y_show[a])).astype(np.uint8)
+                t1, t2 = int(X[a][1][0][0]), int(X[a][2][0][0].numpy())
+                t1 = listT[index]
+                t2 = listT[index] + bottomMargin
+                # random thresholds
+                # t1 = r.randint(bottomMargin, 900 - topMargin)
+                # t2 = r.randint((t1-topMargin if t1 > (maxT-topMargin) else t1), maxT - topMargin)
+                # show extremes
+                # t1 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t1
+                # t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
+                y0 = cv.Canny(x0, t1, t2)
 
-            x1 = x_show[a][0].unsqueeze(0)
-            x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float, device="cuda"),
-                            torch.full(x1.shape, t2, dtype=torch.float, device="cuda")]).unsqueeze(0).cuda()
-            x1 = net(x1)
-            x1 = inv_norm(x1.squeeze(0))
-            x1 = cuda_np(x1[0])
+                x1 = x_show[a][0].unsqueeze(0)
+                x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float, device="cuda"),
+                                torch.full(x1.shape, t2, dtype=torch.float, device="cuda")]).unsqueeze(0).cuda()
+                x1 = net(x1)
+                x1 = inv_norm(x1.squeeze(0))
+                x1 = cuda_np(x1[0])
 
-            ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
-            ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
-            ax[0].set_title(str(t1) + '   and   ' + str(t2))
-            ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
-            # ax[1].set_title('target')
-            ax[2].imshow(x1, cmap=plt.cm.gray, interpolation='nearest')
-            # ax[2].set_title('output')
-        plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
-        plt.savefig((img_folder + "comparison_thresholds_"+parameters), format='png')
+                ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
+                ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
+                #ax[0].set_title(str(t1) + '   and   ' + str(t2))
+                ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
+                # ax[1].set_title('target')
+                ax[2].imshow(x1, cmap=plt.cm.gray, interpolation='nearest')
+                # ax[2].set_title('output')
+            plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
+            saveimg("compare_thresholds_", show)
+
 
 # visualize last output of network
+'''
 axs = plt.subplots(2, 7)[1].ravel()
 for i, ax in enumerate(axs):
     ax.axis('off')
     im = output[i][0].cpu().detach().numpy()
     ax.imshow(im, cmap=plt.cm.gray, interpolation='nearest')
 plt.show()
+'''
+
+'''
+print(" ## WARNING ## \n ---- shutting down in 5 minutes ---- \n ## WARNING ##")
+os.system("shutdown /s /t 300");
+time.sleep(180)
+print(" ## WARNING ## \n ---- shutting down in 2 minutes ---- \n ## WARNING ##")
+sys.stdout.close()
+'''
