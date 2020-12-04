@@ -17,14 +17,13 @@ from torch.utils.data import Dataset, DataLoader
 from functools import partial
 from torchsummary import summary
 import piq
-from typing import Union, Tuple
 import hiddenlayer as hl
 import winsound
 import os
 import time
 import sys
 
-#sys.stdout = open(r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\console.txt', 'w')
+sys.stdout = open(r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\console.txt', 'w')
 
 ### temporary ###
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"    #instead conda install nomkl
@@ -76,6 +75,14 @@ def saveimg(name, show):
 
 def cuda_np(tensor):
     return tensor.cpu().detach().numpy()
+
+
+def weights_init(m):
+    if isinstance(m, nn.Conv2d):
+        nn.init.xavier(m.weight.data)
+        nn.init.xavier(m.bias.data)
+
+# resnet152.apply(weights_init)
 
 
 def createClassDict(class_folder, printingClasses=True):
@@ -252,9 +259,9 @@ class Net(nn.Module):
 
         return h
 
-    def train_net(self, epoch):
-        if epoch == None:
-            print(" --- WARNING : not training because epoch is None --- ")
+    def train(self, epoch):
+        if epoch == False:
+            print(" --- WARNING : not training because epoch is False or 0 --- ")
             return []
         x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
         x_train, y_train = autog.Variable(x_train), autog.Variable(y_train)
@@ -339,24 +346,24 @@ class CannyDataset(Dataset):
 gc.collect()
 torch.cuda.empty_cache()
 
-##########################################
-############# USER INTERFACE #############
-##########################################
+# -----------------------------------------
+# ------------ USER INTERFACE -------------
+# -----------------------------------------
 
 duplicates = None   # optional
 batchsize = 14
 topMargin = 400
 bottomMargin = 150
 blur = 5
-n_epochs = 10    # for training session
-total_eps = 10  # total episodes for saving
+n_epochs = 45   # for training session
+total_eps = 45  # total episodes for saving
 lr = 0.0025
 
-trained = 0
+trained = 1
 continueTraining = 0
 
-train_valid = False
-continueVal = False
+train_valid = True
+continueVal = True
 
 saving = False      # saving model with parameters as name
 printingClasses = False
@@ -365,12 +372,13 @@ BCEL = False
 show = False    # show or save plots
 
 
-##########################################
-############# USER INTERFACE #############
-##########################################
+# -----------------------------------------
+# ------------ USER INTERFACE -------------
+# -----------------------------------------
 
 
 #### additional declarations ####
+
 # path to save model
 PATH = "state_dict_model_latest.pt"
 # path of image folders (folder name = class name)
@@ -441,7 +449,6 @@ print("parameters: ", parameters)
 ################################## TRAINING ##################################
 
 if trained or continueTraining:
-    # Load model
     print("loading model")
     net.load_state_dict(torch.load(PATH))
     net.eval()
@@ -449,23 +456,27 @@ if trained or continueTraining:
 if not trained:
     print("training model")
     t_start = time.time()
-    for epoch in range(n_epochs):
+    optimizer = opt.SGD(net.parameters(), lr=0.01, momentum=0.9, weight_decay=0.005, nesterov=True)
+    scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=0, verbose=True)
+
+    for epoch in range(1, n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
         data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)  # set shuffle true
-
         for i, batch in enumerate(data_loader):
             X, y, _ = batch
-            output, loss = net.train_net(epoch)
+            output, loss = net.train(epoch)
         if epoch % 2 == 0:
             t_end = time.time() - t_start  # training time
             t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
             print(f'Epoch : { epoch + 1} \t Loss : {loss:.4f} \t Time :  {t_string}')
+        scheduler.step()
 
     # Save model
     print("saving model")
     t_end = time.time() - t_start   # training time
     t_string = "_" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s_"
-    PATH = parameters + t_string + PATH if saving else PATH
+    if saving:
+        PATH = parameters + t_string + PATH
     torch.save(net.state_dict(), PATH)
     print("saved model")
     gc.collect()
@@ -496,7 +507,7 @@ resnet152.fc = nn.Linear(in_features=2048, out_features=len(classes), bias=True)
 resnet152 = resnet152.cuda()
 criterion = nn.CrossEntropyLoss().cuda()
 optimizer2 = opt.SGD(resnet152.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
-scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=0, verbose=True)
+scheduler2 = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=0, verbose=True)
 
 # visualizing architecture
 # print(summary(resnet152, (1, 218, 178)))
@@ -511,7 +522,7 @@ if train_valid:
     print("training validation model")
     t = time.time()
     for epoch in range(n_epochs):
-        scheduler.step()
+        scheduler2.step()
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
         data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
 
@@ -519,7 +530,7 @@ if train_valid:
             X, _, z = batch
             X, y = net(X.cuda()), z.cuda()
             X, y = autog.Variable(X), autog.Variable(y)
-            resnet152.trainnet()
+            resnet152.train()
 
             optimizer2.zero_grad()
             output = resnet152(X)
@@ -641,10 +652,9 @@ plt.show()
 '''
 
 # save txt and shutdown
-'''
+
 print(" ## WARNING ## \n ---- shutting down in 5 minutes ---- \n ## WARNING ##")
 os.system("shutdown /s /t 300");
 time.sleep(180)
 print(" ## WARNING ## \n ---- shutting down in 2 minutes ---- \n ## WARNING ##")
 sys.stdout.close()
-'''
