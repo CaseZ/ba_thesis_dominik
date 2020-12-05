@@ -24,12 +24,10 @@ import os
 import time
 import sys
 
-sys.stdout = open(r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\console.txt', 'w')
-
-### temporary ###
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"    #instead conda install nomkl
-#os.environ['CUDA_LAUNCH_BLOCKING'] = "1"       #debug cuda errors
-### temporary ###
+# ## temporary ###
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"    # instead conda install nomkl
+# os.environ['CUDA_LAUNCH_BLOCKING'] = "1"       # debug cuda errors
+# ## temporary ###
 
 
 class Conv2dAutoPad(nn.Conv2d):
@@ -82,6 +80,14 @@ def weights_init(m):
     if isinstance(m, nn.Conv2d):
         nn.init.xavier_normal_(m.weight.data)
         #nn.init.xavier_normal_(m.bias.data)
+
+
+def create_threshImage(img, t1, t2, blur):
+    blurimg = torch.tensor(cv.GaussianBlur(img, (blur, blur), 0)).unsqueeze(0)
+    return torch.cat([blurimg
+                        , torch.full(img.shape, t1, dtype=torch.float)
+                        , torch.full(img.shape, t2, dtype=torch.float)
+                     ])
 
 
 def createClassDict(class_folder, printingClasses=True):
@@ -155,7 +161,6 @@ class ResNetLayer(nn.Module):
     def forward(self, x):
         return self.blocks(x)
 
-
 # visualizing blocks
 
 # print(conv_bn(3, 3, nn.Conv2d, kernel_size=3))
@@ -169,7 +174,6 @@ class ResNetLayer(nn.Module):
 class SurrogateNet(nn.Module):
     def __init__(self):
         super(SurrogateNet, self).__init__()
-        self.BCEL = BCEL    # option to enable sigmoid layer for Binary Cross Entropy Loss
 
         self.conv1 = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=9, stride=1, padding=4),
@@ -300,9 +304,8 @@ class SurrogateNet(nn.Module):
 
 
 class PredictNet(nn.Module):
-    def __init__(self):
-        super(SurrogateNet, self).__init__()
-        self.BCEL = BCEL    # option to enable sigmoid layer for Binary Cross Entropy Loss
+    def __init__(self, surrogate, validate):
+        super(PredictNet, self).__init__()
 
         self.conv1 = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=9, stride=1, padding=4),
@@ -329,7 +332,11 @@ class PredictNet(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        self.fc = nn.Linear(in_features=2048, out_features=2, bias=True)
+        self.fc = nn.Linear(in_features=256, out_features=2, bias=True)
+
+        self.surrogate = surrogate
+
+        self.validate = validate
 
 
     def forward(self, h):
@@ -410,14 +417,8 @@ class CannyDataset(Dataset):
         # create contour image (y)
         target = torch.tensor(cv.Canny(cvimg, t1, t2).astype(float))
 
-        # blurring input image
-        blurimg = torch.tensor(cv.GaussianBlur(cvimg, (blur, blur), 0)).unsqueeze(0)
-
         # create input with image and thresholds as dimension
-        img = torch.cat([blurimg
-                            , torch.full(img.shape, t1, dtype=torch.float)
-                            , torch.full(img.shape, t2, dtype=torch.float)
-                         ])
+        img = create_threshImage(cvimg, t1, t2, blur)
         # normalize input imgae, threshold dimensions and target contour-image
         if normalize:
             img = norm(img)
@@ -435,32 +436,40 @@ torch.cuda.empty_cache()
 
 duplicates = None   # optional
 batchsize = 14
-topMargin = 400
-bottomMargin = 150
-blur = 5
-n_epochs = 50   # for training session
-total_eps = 50  # total episodes for saving
-lr = 0.0025
+topMargin = 400     # threshold value top margin cutoff
+bottomMargin = 150  # threshold value bottom margin cutoff
+blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing to surrogate
+n_epochs = 20       # epochs for training session
+total_eps = 70      # total epochs for saving
 
-trained = 1
-continueTraining = 0
+lrs = 0.0025        # learning rate surrogate model
+lrv = 0.005         # learning rate validation model
+lrp = 0.01          # learning rate prediction model
 
-train_valid = True
-continueVal = False
+# -- surrogate model control--
+trained_surrogate = True    # if true loading model otherwise train from scratch
+continueTraining = False    # continue train when model loaded
 
-saving = False      # saving model with parameters as name
+# -- validation model control--
+trained_valid = True        # if true loading model otherwise train from scratch
+continueVal = False         # continue train when model loaded
+
+# -- misc --
+shutdown_txt = False        # write stdout to txt and shutdown after training
+saving = False              # saving model with parameters as name
 printingClasses = False
-normalize = True
-BCEL = False
-show = False    # show or save plots
+normalize = True            # normalizing input to [0,1]
+show = False                # show or save plots
 
 
 # -----------------------------------------
 # ------------ USER INTERFACE -------------
 # -----------------------------------------
 
+if shutdown_txt:
+    sys.stdout = open(r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\console.txt', 'w')
 
-#### additional declarations ####
+# #### additional declarations ####
 
 PATH = "state_dict_model_latest.pt"
 class_folder = r'C:\Users\dschm\PycharmProjects\ba_thesis\data\ImageNet\imagenet_images'
@@ -472,7 +481,7 @@ AUCS_train, AUCS_val = [], []
 
 maxT = 900  # DO NOT CHANGE (maximum Canny Threshold value, depends on function and dataset)
 
-parameters = f"{total_eps}eps_lr{lr}{'_norm' if normalize else ''}_{blur}blur_topM{topMargin}_lowM{bottomMargin}"
+parameters = f"{total_eps}eps_lrs{lrs}{'_normalized' if normalize else ''}_{blur}blur_topM{topMargin}_lowM{bottomMargin}"
 print("parameters: ", parameters)
 
 
@@ -514,7 +523,7 @@ data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=
 
 criterion = nn.MSELoss().cuda()  # nn.SmoothL1Loss().cuda()
 surrogate_net = SurrogateNet().cuda()
-optimizer = opt.AdamW(surrogate_net.parameters(), lr=lr)
+optimizer = opt.AdamW(surrogate_net.parameters(), lr=lrs)
 
 # visualizing architecture
 #print(summary(surrogate_net, (3, 218, 178)))
@@ -522,12 +531,12 @@ optimizer = opt.AdamW(surrogate_net.parameters(), lr=lr)
 
 
 # ----------- TRAINING -----------
-if trained or continueTraining:
+if trained_surrogate or continueTraining:
     print("loading model")
     surrogate_net.load_state_dict(torch.load(PATH))
     surrogate_net.eval()
 
-if not trained:
+if not trained_surrogate:
     print("training model")
     t_start = time.time()
     optimizer = opt.SGD(surrogate_net.parameters(), lr=0.01, momentum=0.9, weight_decay=0.005, nesterov=True)
@@ -575,7 +584,7 @@ if not trained:
 
 # ----------- VISUALIZING -----------
 print("visualizing  output")
-if saving or not train_valid:
+if saving or trained_valid:
     for i, batch in enumerate(data_loader):
         if i == 0:  # (len(data_loader)-1)
             X, y, _ = batch[0:20]
@@ -641,18 +650,18 @@ if saving or not train_valid:
                 # ax[2].set_title('output')
             plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
             saveimg("compare_thresholds_", show)
+    # visualize last output of network
+    '''
+    axs = plt.subplots(2, 7)[1].ravel()
+    for i, ax in enumerate(axs):
+        ax.axis('off')
+        im = output[i][0].cpu().detach().numpy()
+        ax.imshow(im, cmap=plt.cm.gray, interpolation='nearest')
+    plt.show()
+    '''
 
 
-
-################################# PREDICTION MODEL #################################
-
-# predict_net = PredictNet().cuda()
-# criterion? should be val model performance
-# optimizer = opt.AdamW(surrogate_net.parameters(), lr=0.1)
-
-
-
-################################# VALIDATION MODEL #################################
+# ################################ VALIDATION MODEL #################################
 
 resnet152 = tv.models.resnet152()
 # change first and last layer for 1d input and output class length
@@ -663,13 +672,14 @@ resnet152.train()
 resnet152.apply(weights_init)   # xavier init for conv2d layers
 
 criterion = nn.CrossEntropyLoss().cuda()
-optimizer2 = opt.SGD(resnet152.parameters(), lr=0.01, momentum=0.9, weight_decay=0.005, nesterov=True)
+optimizer2 = opt.SGD(resnet152.parameters(), lr=lrv, momentum=0.9, weight_decay=0.005, nesterov=True)
 #scheduler2 = lr_scheduler.CosineAnnealingWarmRestarts(optimizer2, T_0=5, T_mult=2, eta_min=0, last_epoch=-1, verbose=True)
 scheduler2 = lr_scheduler.CosineAnnealingLR(optimizer2, T_max=n_epochs, eta_min=0, verbose=True)
 
 # visualizing architecture
-# print(summary(resnet152, (1, 218, 178)))
-# render(surrogate_net, path='data/graph_minimal')
+#print(summary(resnet152, (1, 218, 178)))
+#render(surrogate_net, path='data/graph_minimal')
+
 
 # ----------- TRAINING -----------
 if continueVal:
@@ -677,7 +687,7 @@ if continueVal:
     print("loading validation model")
     resnet152.load_state_dict(torch.load("validation_" + PATH))
 
-if train_valid:
+if not trained_valid:
     print("training validation model")
     t = time.time()
     for epoch in range(n_epochs):
@@ -735,20 +745,20 @@ if train_valid:
     saveimg("valmodel_loss_", show)
 
 
-# visualize last output of network
-'''
-axs = plt.subplots(2, 7)[1].ravel()
-for i, ax in enumerate(axs):
-    ax.axis('off')
-    im = output[i][0].cpu().detach().numpy()
-    ax.imshow(im, cmap=plt.cm.gray, interpolation='nearest')
-plt.show()
-'''
+# ################################ PREDICTION MODEL #################################
 
-# save txt and shutdown
+predict_net = PredictNet(surrogate_net, resnet152).cuda()
+# criterion? should be val model performance
+# optimizer = opt.AdamW(surrogate_net.parameters(), lr=0.1)
 
-print(" ## WARNING ## \n ---- shutting down in 5 minutes ---- \n ## WARNING ##")
-os.system("shutdown /s /t 300");
-time.sleep(180)
-print(" ## WARNING ## \n ---- shutting down in 2 minutes ---- \n ## WARNING ##")
-sys.stdout.close()
+
+
+
+
+# save console to txt and shutdown
+if shutdown_txt:
+    print(" ## WARNING ## \n ---- shutting down in 5 minutes ---- \n ## WARNING ##")
+    os.system("shutdown /s /t 300");
+    time.sleep(180)
+    print(" ## WARNING ## \n ---- shutting down in 2 minutes ---- \n ## WARNING ##")
+    sys.stdout.close()
