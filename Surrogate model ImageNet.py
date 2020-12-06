@@ -308,7 +308,7 @@ class PredictNet(nn.Module):
         super(PredictNet, self).__init__()
 
         self.conv1 = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=9, stride=1, padding=4),
+            nn.Conv2d(1, 64, kernel_size=9, stride=1, padding=4),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=4, stride=2, padding=1)
@@ -320,34 +320,48 @@ class PredictNet(nn.Module):
             nn.MaxPool2d(kernel_size=5, stride=2, padding=1)
         )
 
-        self.sConv1 = nn.Sequential(
+        self.conv3 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=5, stride=1, padding=2),
-            nn.BatchNorm2d(1),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=5, stride=2, padding=1)
         )
 
-        self.sConv2 = nn.Sequential(
+        self.conv4 = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=5, stride=1, padding=2),
-            nn.BatchNorm2d(1),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=5, stride=2, padding=1)
         )
 
+        self.avgpool = nn.AdaptiveAvgPool2d(output_size=(1, 1))
         self.fc = nn.Linear(in_features=256, out_features=2, bias=True)
 
+        for param in surrogate.parameters():
+            param.requires_grad = False     # freeze model
         self.surrogate = surrogate
 
+        for param in validate.parameters():
+            param.requires_grad = False     # freeze model
         self.validate = validate
 
 
     def forward(self, h):
-
+        og_im = h
         h = self.conv1(h)
         h = self.conv2(h)
+        h = self.conv3(h)
+        h = self.conv4(h)
 
-        h = self.sConv1(h)
-        h = self.sConv2(h)
+        h = self.avgpool(h)
         h = self.fc(h)
-        return h
+        print(f"thresholds: {h}")
+
+        h_3 = create_threshImage(og_im, h[0], h[1], blur)
+        contour_im = self.surrogate(h_3)
+        c = self.validate(contour_im)
+
+        return c
 
     def train(self, epoch):
         if epoch == False:
@@ -367,26 +381,25 @@ class PredictNet(nn.Module):
         optimizer.zero_grad()
 
         # prediction for training and validation set
-        output_train = surrogate_net(x_train)
+        output_train = predict_net(x_train)
         with torch.no_grad():
-            output_val = surrogate_net(x_val)
+            output_val = predict_net(x_val)
 
         # computing the training and validation loss
         loss_train = criterion(output_train, y_train)
         with torch.no_grad():
             loss_val = criterion(output_val, y_val)
-        train_losses.append(cuda_np(loss_train))
-        val_losses.append(cuda_np(loss_val))
 
-        # SSIM loss
-        ssim_train = piq.ssim(output_train, y_train, data_range=1.)
-        ssim_val = piq.ssim(output_val, y_val, data_range=1.)
-        SSIM_train.append(cuda_np(ssim_train))
-        SSIM_val.append(cuda_np(ssim_val))
+        output = predict_net(X)
+        loss = criterion(output, y)
 
-        # computing the updated weights of all the model parameters
-        loss_train.backward()
-        optimizer.step()
+        output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
+        acc = metrics.accuracy_score(cuda_np(output), cuda_np(y))
+        AUCS_train.append(acc)
+        vloss.append(loss.item())
+        loss.backward()
+        optimizer2.step()
+
         return output_train, loss_train.item()
 
 
@@ -449,6 +462,7 @@ lrp = 0.01          # learning rate prediction model
 # -- surrogate model control--
 trained_surrogate = True    # if true loading model otherwise train from scratch
 continueTraining = False    # continue train when model loaded
+viz_surrogate = False       # visualize output of surrogate network
 
 # -- validation model control--
 trained_valid = True        # if true loading model otherwise train from scratch
@@ -583,8 +597,8 @@ if not trained_surrogate:
 
 
 # ----------- VISUALIZING -----------
-print("visualizing  output")
-if saving or trained_valid:
+if viz_surrogate:
+    print("visualizing  output")
     for i, batch in enumerate(data_loader):
         if i == 0:  # (len(data_loader)-1)
             X, y, _ = batch[0:20]
@@ -750,7 +764,8 @@ if not trained_valid:
 predict_net = PredictNet(surrogate_net, resnet152).cuda()
 # criterion? should be val model performance
 # optimizer = opt.AdamW(surrogate_net.parameters(), lr=0.1)
-
+print(resnet152)
+print(summary(predict_net, (1, 218, 218)))
 
 
 
