@@ -83,12 +83,21 @@ def weights_init(m):
 
 
 def create_threshImage(img, t1, t2, blur):
+    if isinstance(img, torch.Tensor):
+        img = img.numpy()
+    img = (img[0] * 255).astype(np.uint8)
     blurimg = torch.tensor(cv.GaussianBlur(img, (blur, blur), 0)).unsqueeze(0)
-    return torch.cat([blurimg
-                        , torch.full(img.shape, t1, dtype=torch.float)
-                        , torch.full(img.shape, t2, dtype=torch.float)
-                     ])
+    buffer = torch.cat([blurimg
+                        , torch.full(img.shape, t1, dtype=torch.float).unsqueeze(0)
+                        , torch.full(img.shape, t2, dtype=torch.float).unsqueeze(0)
+                     ], dim=0)
+    return buffer
 
+def create_surrogate_input(h, img):
+    new_h = []
+    for i, thresh in enumerate(cuda_np(h)):
+        new_h.append(create_threshImage(np.float32([img[i]]), thresh[0], thresh[1], blur).cuda().unsqueeze(0))
+    return torch.cat(new_h).squeeze(2)
 
 def createClassDict(class_folder, printingClasses=True):
     # create dictionary for classes
@@ -267,7 +276,7 @@ class SurrogateNet(nn.Module):
             print(" --- WARNING : not training because epoch is False or 0 --- ")
             return []
         x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
-        x_train, y_train = autog.Variable(x_train), autog.Variable(y_train)
+        x_train, y_train = x_train.requires_grad(), y_train.requires_grad()
 
         x_train = x_train.float().cuda()
         y_train = y_train.float().cuda().unsqueeze(1)
@@ -354,21 +363,21 @@ class PredictNet(nn.Module):
         h = self.conv4(h)
 
         h = self.avgpool(h)
-        h = self.fc(h)
-        print(f"thresholds: {h}")
+        thresholds = self.fc(h.flatten(start_dim=1))
 
-        h_3 = create_threshImage(og_im, h[0], h[1], blur)
+        h_3 = create_surrogate_input(thresholds, cuda_np(og_im))
         contour_im = self.surrogate(h_3)
         c = self.validate(contour_im)
-
-        return c
+        c.requires_grad = True
+        return c, thresholds
 
     def train(self, epoch):
         if epoch == False:
             print(" --- WARNING : not training because epoch is False or 0 --- ")
             return []
         x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
-        x_train, y_train = autog.Variable(x_train), autog.Variable(y_train)
+        x_train.requires_grad = True
+        y_train.requires_grad = True
 
         x_train = x_train.float().cuda()
         y_train = y_train.float().cuda().unsqueeze(1)
@@ -406,7 +415,7 @@ class PredictNet(nn.Module):
 class CannyDataset(Dataset):
 
     def __init__(self, data, topMargin=0, bottomMargin=0, normalize=False, norm=None, tnorm=None, blur=0,
-                 download=False):
+                 download=False, noThresholds=False):
         self.data = data
         self.topMargin = topMargin
         self.bottomMargin = bottomMargin
@@ -414,6 +423,7 @@ class CannyDataset(Dataset):
         self.tnorm = tnorm
         self.normalize = normalize
         self.blur = blur
+        self.addThresholds = not noThresholds
 
     def __len__(self):
         return len(self.data)
@@ -421,20 +431,25 @@ class CannyDataset(Dataset):
     def __getitem__(self, index):
         t1 = r.randint(1 + self.bottomMargin, 900 - self.topMargin)
         t2 = r.randint(t1, 900 - self.topMargin)
+
         img = self.data[index][0]
         id = self.data[index][1]
 
         # convert image to UTF-8 numpy array for cv module
         cvimg = (img[0].numpy() * 255).astype(np.uint8)
-
         # create contour image (y)
         target = torch.tensor(cv.Canny(cvimg, t1, t2).astype(float))
 
-        # create input with image and thresholds as dimension
-        img = create_threshImage(cvimg, t1, t2, blur)
-        # normalize input imgae, threshold dimensions and target contour-image
-        if normalize:
+        if self.addThresholds:
+            # create input with image and thresholds as dimension
+            img = create_threshImage(img, t1, t2, blur)
+
+        # normalize input image, threshold dimensions and target contour-image
+        if normalize and self.addThresholds:
             img = norm(img)
+            target = tnorm(target.unsqueeze(0)).squeeze(0)
+        elif normalize:     # use tnorm for img if no threshold dimensions
+            img = target = tnorm(img.unsqueeze(0)).squeeze(0)
             target = tnorm(target.unsqueeze(0)).squeeze(0)
 
         return img, target, id
@@ -452,8 +467,8 @@ batchsize = 14
 topMargin = 400     # threshold value top margin cutoff
 bottomMargin = 150  # threshold value bottom margin cutoff
 blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing to surrogate
-n_epochs = 20       # epochs for training session
-total_eps = 70      # total epochs for saving
+n_epochs = 15       # epochs for training session
+total_eps = 15      # total epochs for saving
 
 lrs = 0.0025        # learning rate surrogate model
 lrv = 0.005         # learning rate validation model
@@ -462,11 +477,15 @@ lrp = 0.01          # learning rate prediction model
 # -- surrogate model control--
 trained_surrogate = True    # if true loading model otherwise train from scratch
 continueTraining = False    # continue train when model loaded
-viz_surrogate = False       # visualize output of surrogate network
+viz_surrogate = True       # visualize output of surrogate network
 
 # -- validation model control--
 trained_valid = True        # if true loading model otherwise train from scratch
 continueVal = False         # continue train when model loaded
+
+# -- prediction model control--
+trained_predict = False        # if true loading model otherwise train from scratch
+continuePredict = False         # continue train when model loaded
 
 # -- misc --
 shutdown_txt = False        # write stdout to txt and shutdown after training
@@ -505,7 +524,9 @@ inv_norm = tf.Normalize(mean=-0., std=1/255.0)  # revert target normalization
 
 std = float(maxT - topMargin - bottomMargin)
 norm = tf.Normalize(mean=[0., bottomMargin, bottomMargin], std=[255.0, std, std])
-inv_input_norm = tf.Normalize(mean=np.negative([0., 0., 0.]), std=np.reciprocal([255.0, std, std]))
+inv_input_norm = tf.Normalize(mean=np.negative([0., bottomMargin, bottomMargin]), std=np.reciprocal([255.0, std, std]))
+
+t_inv = tf.Normalize(mean=np.negative([bottomMargin, bottomMargin]), std=np.reciprocal([std, std]))
 
 
 # ----------- DATASET -----------
@@ -552,9 +573,10 @@ if trained_surrogate or continueTraining:
 
 if not trained_surrogate:
     print("training model")
+    surrogate_net.apply(weights_init)  # xavier init for conv2d layer weights
     t_start = time.time()
-    optimizer = opt.SGD(surrogate_net.parameters(), lr=0.01, momentum=0.9, weight_decay=0.005, nesterov=True)
-    scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=0, verbose=True)
+    optimizer = opt.SGD(surrogate_net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
+    scheduler = scheduler2 = lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=0, verbose=True)
 
     for epoch in range(1, n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
@@ -570,8 +592,6 @@ if not trained_surrogate:
 
     # Save model
     print("saving model")
-    t_end = time.time() - t_start   # training time
-    t_string = "_" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s_"
     if saving:
         PATH = parameters + t_string + PATH
     torch.save(surrogate_net.state_dict(), PATH)
@@ -664,6 +684,7 @@ if viz_surrogate:
                 # ax[2].set_title('output')
             plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
             saveimg("compare_thresholds_", show)
+
     # visualize last output of network
     '''
     axs = plt.subplots(2, 7)[1].ravel()
@@ -683,7 +704,7 @@ resnet152.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3
 resnet152.fc = nn.Linear(in_features=2048, out_features=len(classes), bias=True)
 resnet152 = resnet152.cuda()
 resnet152.train()
-resnet152.apply(weights_init)   # xavier init for conv2d layers
+resnet152.apply(weights_init)   # xavier init for conv2d layer weights
 
 criterion = nn.CrossEntropyLoss().cuda()
 optimizer2 = opt.SGD(resnet152.parameters(), lr=lrv, momentum=0.9, weight_decay=0.005, nesterov=True)
@@ -762,11 +783,68 @@ if not trained_valid:
 # ################################ PREDICTION MODEL #################################
 
 predict_net = PredictNet(surrogate_net, resnet152).cuda()
-# criterion? should be val model performance
-# optimizer = opt.AdamW(surrogate_net.parameters(), lr=0.1)
-print(resnet152)
-print(summary(predict_net, (1, 218, 218)))
+# criterion same as validateNet
+optimizer3 = opt.AdamW(predict_net.parameters(), lr=0.1)
+#print(out)
+#print(predict_net)
+#print(summary(predict_net, (1, 218, 218)))
 
+if not trained_predict:
+    print("training prediction model")
+    t = time.time()
+    for epoch in range(n_epochs):
+        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin, noThresholds=True)
+        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
+
+        for i, batch in enumerate(data_loader):
+            X, _, z = batch
+            X, y = X.cuda(), z.long().cuda()
+            X.requires_grad = True
+            #z.requires_grad = True
+            optimizer3.zero_grad()
+            output, thresholds = predict_net(X)
+            loss = criterion(output, y)
+
+            output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
+            acc = metrics.accuracy_score(cuda_np(output), cuda_np(y))
+            AUCS_train.append(acc)
+            vloss.append(loss.item())
+            loss.backward()
+            optimizer3.step()
+
+        if epoch % 2 == 0:
+            t_end = time.time() - t  # training time
+            t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
+            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {t_string} \t sample thresholds : {thresholds[0]}')
+
+        scheduler2.step()
+        print(f"output : {cuda_np(output).astype(np.int)}")
+        print(f"target : {cuda_np(y)}")
+        print("--------------------------------------")
+
+    # Save model
+    print("saving prediction model")
+    torch.save(resnet152.state_dict(), "predict_" + PATH)
+    print("saved prediction model")
+    t_end = time.time() - t   # training time
+    t_string = "_" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s_"
+    gc.collect()
+    torch.cuda.empty_cache()
+    winsound.Beep(500, 1000)
+
+    axs = plt.subplots(2, 1)[1].ravel()
+    # plot auc score
+    axs[0].plot(AUCS_train, label='Training Accuracy', alpha=0.3)
+    #axs[0].plot(val_losses, label='Validation loss', alpha=0.6)
+    axs[0].set_xlabel('batches')
+    axs[0].legend()
+
+    # plot loss
+    axs[1].plot(vloss, label='Training loss', alpha=0.3)
+    #axs[0].plot(val_losses, label='Validation loss', alpha=0.6)
+    axs[1].set_xlabel('batches')
+    axs[1].legend()
+    saveimg("predictmodel_loss_", show)
 
 
 
