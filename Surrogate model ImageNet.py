@@ -82,10 +82,13 @@ def weights_init(m):
         #nn.init.xavier_normal_(m.bias.data)
 
 
-def create_threshImage(img, t1, t2, blur):
+def create_threshImage(img, t1, t2, blur, preprocess=True):
+    img = img[0]
     if isinstance(img, torch.Tensor):
         img = img.numpy()
-    img = (img[0] * 255).astype(np.uint8)
+    if preprocess:
+        img = (img * 255).astype(np.uint8)
+
     blurimg = torch.tensor(cv.GaussianBlur(img, (blur, blur), 0)).unsqueeze(0)
     buffer = torch.cat([blurimg
                         , torch.full(img.shape, t1, dtype=torch.float).unsqueeze(0)
@@ -93,11 +96,91 @@ def create_threshImage(img, t1, t2, blur):
                      ], dim=0)
     return buffer
 
+
 def create_surrogate_input(h, img):
     new_h = []
     for i, thresh in enumerate(cuda_np(h)):
-        new_h.append(create_threshImage(np.float32([img[i]]), thresh[0], thresh[1], blur).cuda().unsqueeze(0))
+        new_h.append(create_threshImage(np.float32([img[i]]), thresh[0], thresh[1], blur, preprocess=False).cuda().unsqueeze(0))
     return torch.cat(new_h).squeeze(2)
+
+
+def deconstruct_input(input, index):
+    image = (cuda_np(input[index][0])).astype(np.uint8)
+    t1, t2 = int(cuda_np(input[index][1][0][0])), int(cuda_np(input[index][2][0][0]))
+    return image, t1, t2
+
+
+def compare_images(x_show, output, showTarget, name, y_show=None):
+    dim = 3 if showTarget else 2
+    axs = plt.subplots(6, dim)[1]
+
+    for a, ax in enumerate(axs):
+        im = cuda_np(output[a][0])
+        x0, t1, t2 = deconstruct_input(x_show, a)
+
+        ax[0].axis('off'), ax[1].axis('off')
+        ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
+        ax[0].set_title('Thresholds: ' + str(t1) + ' and ' + str(t2))
+        ax[1].imshow(im, cmap=plt.cm.gray, interpolation='nearest')
+
+        # set column header
+        if a == 0:
+            ax[1].set_title('output')
+
+        if showTarget:
+            ax[2].axis('off')
+            y0 = (cuda_np(y_show[a])).astype(np.uint8)
+            ax[2].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
+
+            # set column header
+            if a == 0:
+                ax[2].set_title('target')
+
+    plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
+    saveimg(f"comparison_{name}_", show)    # move function here?
+
+
+def compare_thresholds(x_show):
+    axs = plt.subplots(10, 3)[1]
+
+    a = np.random.randint(0, len(X))
+    step = (((900 - topMargin) - bottomMargin) / len(axs))
+    listT = np.arange(bottomMargin, 900 - topMargin, step)
+
+    for index, ax in enumerate(axs):
+        x0 = (cuda_np(x_show[a][0])).astype(np.uint8)
+        t1 = listT[index]
+        t2 = listT[index] + bottomMargin
+        # random thresholds
+        # t1 = r.randint(bottomMargin, 900 - topMargin)
+        # t2 = r.randint((t1-topMargin if t1 > (maxT-topMargin) else t1), maxT - topMargin)
+        # show extremes
+        # t1 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t1
+        # t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
+        y0 = cv.Canny(x0, t1, t2)
+
+        x1 = x_show[a][0].unsqueeze(0)
+        x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float, device="cuda"),
+                        torch.full(x1.shape, t2, dtype=torch.float, device="cuda")]).unsqueeze(0).cuda()
+        x1 = surrogate_net(x1)
+        x1 = inv_norm(x1.squeeze(0))
+        x1 = cuda_np(x1[0])
+
+        ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
+        ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
+        # ax[0].set_title(str(t1) + '   and   ' + str(t2))
+
+        ax[1].imshow(x1, cmap=plt.cm.gray, interpolation='nearest')
+        ax[2].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
+
+        # set column header
+        if index == 0:
+            ax[1].set_title('output')
+            ax[2].set_title('target')
+
+    plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
+    saveimg("compare_thresholds_", show)
+
 
 def createClassDict(class_folder, printingClasses=True):
     # create dictionary for classes
@@ -345,6 +428,8 @@ class PredictNet(nn.Module):
 
         self.avgpool = nn.AdaptiveAvgPool2d(output_size=(1, 1))
         self.fc = nn.Linear(in_features=256, out_features=2, bias=True)
+        self.sig = nn.Sigmoid()
+        self.sig.requires_grad=False
 
         for param in surrogate.parameters():
             param.requires_grad = False     # freeze model
@@ -356,7 +441,7 @@ class PredictNet(nn.Module):
 
 
     def forward(self, h):
-        og_im = h
+        og_im = h           # save original input image
         h = self.conv1(h)
         h = self.conv2(h)
         h = self.conv3(h)
@@ -364,12 +449,13 @@ class PredictNet(nn.Module):
 
         h = self.avgpool(h)
         thresholds = self.fc(h.flatten(start_dim=1))
+        thresholds = self.sig(thresholds)
 
         h_3 = create_surrogate_input(thresholds, cuda_np(og_im))
         contour_im = self.surrogate(h_3)
-        c = self.validate(contour_im)
-        c.requires_grad = True
-        return c, thresholds
+        classes = self.validate(contour_im)
+        classes.requires_grad = True
+        return classes, thresholds, contour_im, h_3
 
     def train(self, epoch):
         if epoch == False:
@@ -449,7 +535,7 @@ class CannyDataset(Dataset):
             img = norm(img)
             target = tnorm(target.unsqueeze(0)).squeeze(0)
         elif normalize:     # use tnorm for img if no threshold dimensions
-            img = target = tnorm(img.unsqueeze(0)).squeeze(0)
+            img = tnorm(img.unsqueeze(0)).squeeze(0)
             target = tnorm(target.unsqueeze(0)).squeeze(0)
 
         return img, target, id
@@ -467,8 +553,8 @@ batchsize = 14
 topMargin = 400     # threshold value top margin cutoff
 bottomMargin = 150  # threshold value bottom margin cutoff
 blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing to surrogate
-n_epochs = 15       # epochs for training session
-total_eps = 15      # total epochs for saving
+n_epochs = 20       # epochs for training session
+total_eps = 20      # total epochs for saving
 
 lrs = 0.0025        # learning rate surrogate model
 lrv = 0.005         # learning rate validation model
@@ -526,8 +612,6 @@ std = float(maxT - topMargin - bottomMargin)
 norm = tf.Normalize(mean=[0., bottomMargin, bottomMargin], std=[255.0, std, std])
 inv_input_norm = tf.Normalize(mean=np.negative([0., bottomMargin, bottomMargin]), std=np.reciprocal([255.0, std, std]))
 
-t_inv = tf.Normalize(mean=np.negative([bottomMargin, bottomMargin]), std=np.reciprocal([std, std]))
-
 
 # ----------- DATASET -----------
 ImageNet_data = \
@@ -576,11 +660,12 @@ if not trained_surrogate:
     surrogate_net.apply(weights_init)  # xavier init for conv2d layer weights
     t_start = time.time()
     optimizer = opt.SGD(surrogate_net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
-    scheduler = scheduler2 = lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=0, verbose=True)
+    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=0, verbose=True)
 
     for epoch in range(1, n_epochs):
-        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
-        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)  # set shuffle true
+        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
+                               , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur)
+        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
         for i, batch in enumerate(data_loader):
             X, y, _ = batch
             output, loss = surrogate_net.train(epoch)
@@ -630,60 +715,9 @@ if viz_surrogate:
             x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
             output = [inv_norm(out).int() for out in output]
 
-        # image comparison plot
-            axs = plt.subplots(6, 3)[1]
-            for a, ax in enumerate(axs):
-                im = cuda_np(output[a][0])
-                x0 = (cuda_np(x_show[a][0])).astype(np.uint8)
-                y0 = (cuda_np(y_show[a])).astype(np.uint8)
-                t1, t2 = int(cuda_np(x_show[a][1][0][0])), int(cuda_np(x_show[a][2][0][0]))
+            compare_images(x_show, output, name="surrogate", showTarget=True, y_show=y_show)
 
-                ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
-                ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
-                ax[0].set_title('Thresholds: ' + str(t1) + ' and ' + str(t2))
-                ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
-                # ax[1].set_title('target')
-                ax[2].imshow(im, cmap=plt.cm.gray, interpolation='nearest')
-                # ax[2].set_title('output')
-            plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
-            saveimg("comparison_", show)
-
-
-        # threshold comparison
-            axs = plt.subplots(10, 3)[1]
-            a = np.random.randint(0, len(X))
-            step = (((900 - topMargin) - bottomMargin) / len(axs))
-            listT = np.arange(bottomMargin, 900 - topMargin, step)
-            for index, ax in enumerate(axs):
-                x0 = (cuda_np(x_show[a][0])).astype(np.uint8)
-                y0 = (cuda_np(y_show[a])).astype(np.uint8)
-                t1, t2 = int(X[a][1][0][0]), int(X[a][2][0][0].numpy())
-                t1 = listT[index]
-                t2 = listT[index] + bottomMargin
-                # random thresholds
-                # t1 = r.randint(bottomMargin, 900 - topMargin)
-                # t2 = r.randint((t1-topMargin if t1 > (maxT-topMargin) else t1), maxT - topMargin)
-                # show extremes
-                # t1 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t1
-                # t2 = (maxT-topMargin) if index == 0 else maxT if index == 1 else 0 if index == 2 else bottomMargin if index == 3 else t2
-                y0 = cv.Canny(x0, t1, t2)
-
-                x1 = x_show[a][0].unsqueeze(0)
-                x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float, device="cuda"),
-                                torch.full(x1.shape, t2, dtype=torch.float, device="cuda")]).unsqueeze(0).cuda()
-                x1 = surrogate_net(x1)
-                x1 = inv_norm(x1.squeeze(0))
-                x1 = cuda_np(x1[0])
-
-                ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
-                ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
-                #ax[0].set_title(str(t1) + '   and   ' + str(t2))
-                ax[1].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
-                # ax[1].set_title('target')
-                ax[2].imshow(x1, cmap=plt.cm.gray, interpolation='nearest')
-                # ax[2].set_title('output')
-            plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
-            saveimg("compare_thresholds_", show)
+            compare_thresholds(x_show)
 
     # visualize last output of network
     '''
@@ -726,7 +760,8 @@ if not trained_valid:
     print("training validation model")
     t = time.time()
     for epoch in range(n_epochs):
-        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin)
+        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
+                               , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur)
         data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
 
         for i, batch in enumerate(data_loader):
@@ -784,8 +819,9 @@ if not trained_valid:
 
 predict_net = PredictNet(surrogate_net, resnet152).cuda()
 # criterion same as validateNet
-optimizer3 = opt.AdamW(predict_net.parameters(), lr=0.1)
-#print(out)
+optimizer3 = opt.AdamW(predict_net.parameters(), lr=lrp)
+scheduler3 = lr_scheduler.CosineAnnealingLR(optimizer3, T_max=n_epochs, eta_min=0.001, verbose=True)
+
 #print(predict_net)
 #print(summary(predict_net, (1, 218, 218)))
 
@@ -793,16 +829,16 @@ if not trained_predict:
     print("training prediction model")
     t = time.time()
     for epoch in range(n_epochs):
-        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin, noThresholds=True)
+        dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
+                               , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur, noThresholds=True)
         data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
 
         for i, batch in enumerate(data_loader):
             X, _, z = batch
-            X, y = X.cuda(), z.long().cuda()
+            X, y = X.cuda(), z.long().cuda()    #long needed?
             X.requires_grad = True
-            #z.requires_grad = True
             optimizer3.zero_grad()
-            output, thresholds = predict_net(X)
+            output, thresholds, contour_imgs, input_im = predict_net(X)
             loss = criterion(output, y)
 
             output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
@@ -815,9 +851,16 @@ if not trained_predict:
         if epoch % 2 == 0:
             t_end = time.time() - t  # training time
             t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
-            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {t_string} \t sample thresholds : {thresholds[0]}')
+            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {t_string} \t sample thresholds : {thresholds}')
 
-        scheduler2.step()
+        if epoch % 1 == 0:
+            print(contour_imgs.shape, input_im.shape)
+            contour_imgs = [inv_norm(im).int() for im in contour_imgs]
+            input_im = [inv_input_norm(og).int() for og in input_im]
+
+            compare_images(input_im, contour_imgs, name=f"predict{epoch+1}_", showTarget=False)
+
+        scheduler3.step()
         print(f"output : {cuda_np(output).astype(np.int)}")
         print(f"target : {cuda_np(y)}")
         print("--------------------------------------")
