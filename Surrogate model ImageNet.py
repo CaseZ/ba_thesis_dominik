@@ -47,6 +47,14 @@ def conv_bn(in_channels, out_channels, conv, *args, **kwargs):
                                       }))
 
 
+def list_shape(x):
+    shape = []
+    while isinstance(x, list):
+        shape.append(len(x))
+        x = x[0]
+    return shape
+
+
 def render(net, path):
     transforms = [
         hl.transforms.Fold("Conv > BatchNorm > Relu > MaxPool", "ConvBnReluMaxP", "Convolution with Pooling"),
@@ -119,9 +127,9 @@ def compare_images(x_show, output, showTarget, name, y_show=None):
         x0, t1, t2 = deconstruct_input(x_show, a)
 
         ax[0].axis('off'), ax[1].axis('off')
-        ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
+        ax[0].imshow(x0, cmap=plt.get_cmap('gray'), interpolation='nearest')
         ax[0].set_title('Thresholds: ' + str(t1) + ' and ' + str(t2))
-        ax[1].imshow(im, cmap=plt.cm.gray, interpolation='nearest')
+        ax[1].imshow(im, cmap=plt.get_cmap('gray'), interpolation='nearest')
 
         # set column header
         if a == 0:
@@ -130,7 +138,7 @@ def compare_images(x_show, output, showTarget, name, y_show=None):
         if showTarget:
             ax[2].axis('off')
             y0 = (cuda_np(y_show[a])).astype(np.uint8)
-            ax[2].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
+            ax[2].imshow(y0, cmap=plt.get_cmap('gray'), interpolation='nearest')
 
             # set column header
             if a == 0:
@@ -167,11 +175,11 @@ def compare_thresholds(x_show):
         x1 = cuda_np(x1[0])
 
         ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
-        ax[0].imshow(x0, cmap=plt.cm.gray, interpolation='nearest')
+        ax[0].imshow(x0, cmap=plt.get_cmap('gray'), interpolation='nearest')
         # ax[0].set_title(str(t1) + '   and   ' + str(t2))
 
-        ax[1].imshow(x1, cmap=plt.cm.gray, interpolation='nearest')
-        ax[2].imshow(y0, cmap=plt.cm.gray, interpolation='nearest')
+        ax[1].imshow(x1, cmap=plt.get_cmap('gray'), interpolation='nearest')
+        ax[2].imshow(y0, cmap=plt.get_cmap('gray'), interpolation='nearest')
 
         # set column header
         if index == 0:
@@ -442,6 +450,7 @@ class PredictNet(nn.Module):
 
     def forward(self, h):
         og_im = h           # save original input image
+
         h = self.conv1(h)
         h = self.conv2(h)
         h = self.conv3(h)
@@ -455,47 +464,8 @@ class PredictNet(nn.Module):
         contour_im = self.surrogate(h_3)
         classes = self.validate(contour_im)
         classes.requires_grad = True
+
         return classes, thresholds, contour_im, h_3
-
-    def train(self, epoch):
-        if epoch == False:
-            print(" --- WARNING : not training because epoch is False or 0 --- ")
-            return []
-        x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
-        x_train.requires_grad = True
-        y_train.requires_grad = True
-
-        x_train = x_train.float().cuda()
-        y_train = y_train.float().cuda().unsqueeze(1)
-        x_val = x_val.float().cuda()
-        y_val = y_val.float().cuda().unsqueeze(1)
-        x_val.requires_grad = False
-        y_val.requires_grad = False
-
-        # clearing the Gradients of the model parameters
-        optimizer.zero_grad()
-
-        # prediction for training and validation set
-        output_train = predict_net(x_train)
-        with torch.no_grad():
-            output_val = predict_net(x_val)
-
-        # computing the training and validation loss
-        loss_train = criterion(output_train, y_train)
-        with torch.no_grad():
-            loss_val = criterion(output_val, y_val)
-
-        output = predict_net(X)
-        loss = criterion(output, y)
-
-        output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
-        acc = metrics.accuracy_score(cuda_np(output), cuda_np(y))
-        AUCS_train.append(acc)
-        vloss.append(loss.item())
-        loss.backward()
-        optimizer2.step()
-
-        return output_train, loss_train.item()
 
 
 class CannyDataset(Dataset):
@@ -711,9 +681,17 @@ if viz_surrogate:
             y_show = y[0:20].cuda()
             output = surrogate_net(x_show)
 
+            #print(output.shape, output[0][0])
+            #print("-----")
+
         # invert normalization
             x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
             output = [inv_norm(out).int() for out in output]
+
+            #print(list_shape(output))
+            #print(output[0].shape)
+            #print(output[0][0])
+            #bla
 
             compare_images(x_show, output, name="surrogate", showTarget=True, y_show=y_show)
 
@@ -854,9 +832,14 @@ if not trained_predict:
             print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {t_string} \t sample thresholds : {thresholds}')
 
         if epoch % 1 == 0:
-            print(contour_imgs.shape, input_im.shape)
-            contour_imgs = [inv_norm(im).int() for im in contour_imgs]
-            input_im = [inv_input_norm(og).int() for og in input_im]
+            plt.show()
+            print(input_im[0][0])
+            plt.imshow(cuda_np(input_im[0][0]), cmap=plt.get_cmap('gray'))
+            plt.title(f"test image {i}")
+            plt.show()
+            print("-----")
+            #contour_imgs = [inv_norm(im).int() for im in contour_imgs]
+            #input_im = [inv_input_norm(og).int() for og in input_im]
 
             compare_images(input_im, contour_imgs, name=f"predict{epoch+1}_", showTarget=False)
 
