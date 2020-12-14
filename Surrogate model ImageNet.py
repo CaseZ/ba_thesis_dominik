@@ -55,6 +55,14 @@ def list_shape(x):
     return shape
 
 
+def minmax(input):
+    if isinstance(input, torch.Tensor):
+        return f"max : {torch.max(input).item():.5f} \t min : {torch.min(input[input.nonzero(as_tuple=True)]).item()}"
+    else:
+        return f"max : {np.max([torch.max(x) for x in input]).item():.5f} \t " \
+               f"min : {np.min([torch.min(x[x.nonzero(as_tuple=True)]) for x in input]).item()}"
+
+
 def render(net, path):
     transforms = [
         hl.transforms.Fold("Conv > BatchNorm > Relu > MaxPool", "ConvBnReluMaxP", "Convolution with Pooling"),
@@ -81,7 +89,9 @@ def saveimg(name, show):
 
 
 def cuda_np(tensor):
-    return tensor.cpu().detach().numpy()
+    if tensor.is_cuda:
+        return tensor.cpu().detach().numpy()
+    return tensor.detach().numpy()
 
 
 def weights_init(m):
@@ -113,12 +123,13 @@ def create_surrogate_input(h, img):
 
 
 def deconstruct_input(input, index):
-    image = (cuda_np(input[index][0])).astype(np.uint8)
+    image = (cuda_np(input[index][0]))
     t1, t2 = int(cuda_np(input[index][1][0][0])), int(cuda_np(input[index][2][0][0]))
     return image, t1, t2
 
 
 def compare_images(x_show, output, showTarget, name, y_show=None):
+
     dim = 3 if showTarget else 2
     axs = plt.subplots(6, dim)[1]
 
@@ -461,7 +472,11 @@ class PredictNet(nn.Module):
         thresholds = self.sig(thresholds)
 
         h_3 = create_surrogate_input(thresholds, cuda_np(og_im))
+        #print("img: ", minmax(h_3[0]))
+        #print("t1: ", minmax(h_3[0][1]))
+        #print("t2: ", minmax(h_3[0][2]))
         contour_im = self.surrogate(h_3)
+        #print("contour: ", minmax(contour_im))
         classes = self.validate(contour_im)
         classes.requires_grad = True
 
@@ -493,19 +508,22 @@ class CannyDataset(Dataset):
 
         # convert image to UTF-8 numpy array for cv module
         cvimg = (img[0].numpy() * 255).astype(np.uint8)
+
         # create contour image (y)
         target = torch.tensor(cv.Canny(cvimg, t1, t2).astype(float))
 
-        if self.addThresholds:
-            # create input with image and thresholds as dimension
-            img = create_threshImage(img, t1, t2, blur)
+        img = create_threshImage(img, t1, t2, blur)
+
+        if not self.addThresholds:
+            # create input with image without thresholds as dimension
+            img = img[0]
 
         # normalize input image, threshold dimensions and target contour-image
         if normalize and self.addThresholds:
             img = norm(img)
             target = tnorm(target.unsqueeze(0)).squeeze(0)
         elif normalize:     # use tnorm for img if no threshold dimensions
-            img = tnorm(img.unsqueeze(0)).squeeze(0)
+            img = tnorm(img.unsqueeze(0))
             target = tnorm(target.unsqueeze(0)).squeeze(0)
 
         return img, target, id
@@ -528,7 +546,7 @@ total_eps = 20      # total epochs for saving
 
 lrs = 0.0025        # learning rate surrogate model
 lrv = 0.005         # learning rate validation model
-lrp = 0.01          # learning rate prediction model
+lrp = 0.1          # learning rate prediction model
 
 # -- surrogate model control--
 trained_surrogate = True    # if true loading model otherwise train from scratch
@@ -679,19 +697,20 @@ if viz_surrogate:
             X, y, _ = batch[0:20]
             x_show = X[0:20].cuda()
             y_show = y[0:20].cuda()
+
+            #print("before surrogate img : ", minmax(x_show[0]))
+            #print("before surrogate t1 : ", minmax(x_show[1]))
+            #print("before surrogate t2 : ", minmax(x_show[2]))
+
             output = surrogate_net(x_show)
 
-            #print(output.shape, output[0][0])
-            #print("-----")
+            #print("after surrogate: ", minmax(output))
 
         # invert normalization
             x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
             output = [inv_norm(out).int() for out in output]
 
-            #print(list_shape(output))
-            #print(output[0].shape)
-            #print(output[0][0])
-            #bla
+            #print("after denorm: ", minmax(output))
 
             compare_images(x_show, output, name="surrogate", showTarget=True, y_show=y_show)
 
@@ -813,7 +832,7 @@ if not trained_predict:
 
         for i, batch in enumerate(data_loader):
             X, _, z = batch
-            X, y = X.cuda(), z.long().cuda()    #long needed?
+            X, y = X.cuda(), z.cuda()    #long needed?
             X.requires_grad = True
             optimizer3.zero_grad()
             output, thresholds, contour_imgs, input_im = predict_net(X)
@@ -832,14 +851,9 @@ if not trained_predict:
             print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {t_string} \t sample thresholds : {thresholds}')
 
         if epoch % 1 == 0:
-            plt.show()
-            print(input_im[0][0])
-            plt.imshow(cuda_np(input_im[0][0]), cmap=plt.get_cmap('gray'))
-            plt.title(f"test image {i}")
-            plt.show()
-            print("-----")
             #contour_imgs = [inv_norm(im).int() for im in contour_imgs]
             #input_im = [inv_input_norm(og).int() for og in input_im]
+
 
             compare_images(input_im, contour_imgs, name=f"predict{epoch+1}_", showTarget=False)
 
@@ -877,7 +891,7 @@ if not trained_predict:
 # save console to txt and shutdown
 if shutdown_txt:
     print(" ## WARNING ## \n ---- shutting down in 5 minutes ---- \n ## WARNING ##")
-    os.system("shutdown /s /t 300");
+    os.system("shutdown /s /t 300")
     time.sleep(180)
     print(" ## WARNING ## \n ---- shutting down in 2 minutes ---- \n ## WARNING ##")
     sys.stdout.close()
