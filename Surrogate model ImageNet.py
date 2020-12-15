@@ -63,6 +63,11 @@ def minmax(input):
                f"min : {np.min([torch.min(x[x.nonzero(as_tuple=True)]) for x in input]).item()}"
 
 
+def freeze(model):
+    for param in model.parameters():
+        param.requires_grad = False  # freeze model
+
+
 def render(net, path):
     transforms = [
         hl.transforms.Fold("Conv > BatchNorm > Relu > MaxPool", "ConvBnReluMaxP", "Convolution with Pooling"),
@@ -95,10 +100,8 @@ def cuda_np(tensor):
 
 
 def weights_init(m, customgain=False, freeze=False):
-    if predict_net is not None and (m != predict_net.surrogate or m != predict_net.validate):
-        print(m)
-    if isinstance(m, nn.Conv2d) and predict_net is not None and (m != predict_net.surrogate or m != predict_net.validate):
-        nn.init.xavier_normal_(m.weight.data)
+    if isinstance(m, nn.Conv2d):
+        nn.init.xavier_normal_(m.weight.data, gain=(nn.init.calculate_gain('relu') if customgain else 1))
         #nn.init.xavier_normal_(m.bias.data)
 
 
@@ -420,7 +423,7 @@ class SurrogateNet(nn.Module):
 
 
 class PredictNet(nn.Module):
-    def __init__(self, surrogate, validate):
+    def __init__(self, surrogate=None, validate=None):
         super(PredictNet, self).__init__()
 
         self.conv1 = nn.Sequential(
@@ -455,13 +458,13 @@ class PredictNet(nn.Module):
         self.sig = nn.Sigmoid()
         self.sig.requires_grad=False
 
-        for param in surrogate.parameters():
-            param.requires_grad = False     # freeze model
-        self.surrogate = surrogate
+        if surrogate is not None:
+            freeze(validate)
+            self.surrogate = surrogate
 
-        for param in validate.parameters():
-            param.requires_grad = False     # freeze model
-        self.validate = validate
+        if validate is not None:
+            freeze(validate)
+            self.validate = validate
 
 
     def forward(self, h):
@@ -543,8 +546,8 @@ batchsize = 14
 topMargin = 400     # threshold value top margin cutoff
 bottomMargin = 150  # threshold value bottom margin cutoff
 blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing to surrogate
-n_epochs = 20       # epochs for training session
-total_eps = 20      # total epochs for saving
+n_epochs = 50       # epochs for training session
+total_eps = 50      # total epochs for saving
 
 lrs = 0.0025        # (starting) learning rate surrogate model
 lrv = 0.005         # (starting) learning rate validation model
@@ -565,7 +568,7 @@ trained_predict = False         # if true loading model otherwise train from scr
 continuePredict = False         # continue train when model loaded
 
 # -- misc --
-shutdown_txt = False            # write stdout to txt and shutdown after training
+shutdown_txt = True            # write stdout to txt and shutdown after training
 saving = False                  # saving model with parameters as name
 printingClasses = False
 normalize = True                # normalizing input to [0,1]
@@ -809,11 +812,14 @@ if not trained_valid:
 
 # ################################ PREDICTION MODEL #################################
 
-predict_net = PredictNet(surrogate_net, resnet152).cuda()
+predict_net = PredictNet().cuda()
 # criterion same as validateNet
 optimizer3 = opt.AdamW(predict_net.parameters(), lr=lrp)
 scheduler3 = lr_scheduler.CosineAnnealingLR(optimizer3, T_max=n_epochs, eta_min=0.001, verbose=True)
 predict_net.apply(weights_init)  # xavier init for conv2d layer weights
+freeze(surrogate_net), freeze(resnet152)
+predict_net.surrogate = surrogate_net
+predict_net.validate = resnet152
 
 #print(predict_net)
 #print(summary(predict_net, (1, 218, 218)))
