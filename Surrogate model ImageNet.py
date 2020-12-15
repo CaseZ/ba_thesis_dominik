@@ -94,8 +94,10 @@ def cuda_np(tensor):
     return tensor.detach().numpy()
 
 
-def weights_init(m):
-    if isinstance(m, nn.Conv2d):
+def weights_init(m, customgain=False, freeze=False):
+    if predict_net is not None and (m != predict_net.surrogate or m != predict_net.validate):
+        print(m)
+    if isinstance(m, nn.Conv2d) and predict_net is not None and (m != predict_net.surrogate or m != predict_net.validate):
         nn.init.xavier_normal_(m.weight.data)
         #nn.init.xavier_normal_(m.bias.data)
 
@@ -131,11 +133,12 @@ def deconstruct_input(input, index):
 def compare_images(x_show, output, showTarget, name, y_show=None):
 
     dim = 3 if showTarget else 2
-    axs = plt.subplots(6, dim)[1]
+    fig_i, axs = plt.subplots(6, dim)
 
     for a, ax in enumerate(axs):
         im = cuda_np(output[a][0])
         x0, t1, t2 = deconstruct_input(x_show, a)
+        t1, t2 = int(t1/std), int(t2/std)
 
         ax[0].axis('off'), ax[1].axis('off')
         ax[0].imshow(x0, cmap=plt.get_cmap('gray'), interpolation='nearest')
@@ -157,10 +160,11 @@ def compare_images(x_show, output, showTarget, name, y_show=None):
 
     plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
     saveimg(f"comparison_{name}_", show)    # move function here?
+    plt.close(fig_i)
 
 
 def compare_thresholds(x_show):
-    axs = plt.subplots(10, 3)[1]
+    fig_c, axs = plt.subplots(10, 3)
 
     a = np.random.randint(0, len(X))
     step = (((900 - topMargin) - bottomMargin) / len(axs))
@@ -199,6 +203,7 @@ def compare_thresholds(x_show):
 
     plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
     saveimg("compare_thresholds_", show)
+    plt.close(fig_c)
 
 
 def createClassDict(class_folder, printingClasses=True):
@@ -373,7 +378,7 @@ class SurrogateNet(nn.Module):
 
         return h
 
-    def train(self, epoch):
+    def train(self, epoch=False):
         if epoch == False:
             print(" --- WARNING : not training because epoch is False or 0 --- ")
             return []
@@ -472,12 +477,9 @@ class PredictNet(nn.Module):
         thresholds = self.sig(thresholds)
 
         h_3 = create_surrogate_input(thresholds, cuda_np(og_im))
-        #print("img: ", minmax(h_3[0]))
-        #print("t1: ", minmax(h_3[0][1]))
-        #print("t2: ", minmax(h_3[0][2]))
-        contour_im = self.surrogate(h_3)
-        #print("contour: ", minmax(contour_im))
-        classes = self.validate(contour_im)
+        contour_im = self.surrogate(h_3)        # surrogate pass
+
+        classes = self.validate(contour_im)     # resnet152 pass
         classes.requires_grad = True
 
         return classes, thresholds, contour_im, h_3
@@ -544,29 +546,30 @@ blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing
 n_epochs = 20       # epochs for training session
 total_eps = 20      # total epochs for saving
 
-lrs = 0.0025        # learning rate surrogate model
-lrv = 0.005         # learning rate validation model
-lrp = 0.1          # learning rate prediction model
+lrs = 0.0025        # (starting) learning rate surrogate model
+lrv = 0.005         # (starting) learning rate validation model
+lrp = 0.1           # (starting) learning rate prediction model
 
 # -- surrogate model control--
-trained_surrogate = True    # if true loading model otherwise train from scratch
-continueTraining = False    # continue train when model loaded
-viz_surrogate = True       # visualize output of surrogate network
+trained_surrogate = True        # if true loading model otherwise train from scratch
+continueTraining = False        # continue train when model loaded
+viz_surrogate = True            # visualize output of surrogate network
 
 # -- validation model control--
-trained_valid = True        # if true loading model otherwise train from scratch
-continueVal = False         # continue train when model loaded
+trained_valid = True            # if true loading model otherwise train from scratch
+continueVal = False             # continue train when model loaded
 
 # -- prediction model control--
-trained_predict = False        # if true loading model otherwise train from scratch
+predict_net = None
+trained_predict = False         # if true loading model otherwise train from scratch
 continuePredict = False         # continue train when model loaded
 
 # -- misc --
-shutdown_txt = False        # write stdout to txt and shutdown after training
-saving = False              # saving model with parameters as name
+shutdown_txt = False            # write stdout to txt and shutdown after training
+saving = False                  # saving model with parameters as name
 printingClasses = False
-normalize = True            # normalizing input to [0,1]
-show = False                # show or save plots
+normalize = True                # normalizing input to [0,1]
+show = False                    # show or save plots
 
 
 # -----------------------------------------
@@ -584,7 +587,7 @@ img_folder = r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\_'
 
 train_losses, val_losses, vloss = [], [], []
 SSIM_train, SSIM_val = [], []
-AUCS_train, AUCS_val = [], []
+accuracy_train, accuracy_val = [], []
 
 maxT = 900  # DO NOT CHANGE (maximum Canny Threshold value, depends on function and dataset)
 
@@ -631,6 +634,7 @@ data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=
 criterion = nn.MSELoss().cuda()  # nn.SmoothL1Loss().cuda()
 surrogate_net = SurrogateNet().cuda()
 optimizer = opt.AdamW(surrogate_net.parameters(), lr=lrs)
+surrogate_net.apply(weights_init)  # xavier init for conv2d layer weights
 
 # visualizing architecture
 #print(summary(surrogate_net, (3, 218, 178)))
@@ -645,7 +649,6 @@ if trained_surrogate or continueTraining:
 
 if not trained_surrogate:
     print("training model")
-    surrogate_net.apply(weights_init)  # xavier init for conv2d layer weights
     t_start = time.time()
     optimizer = opt.SGD(surrogate_net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
     scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=0, verbose=True)
@@ -698,19 +701,11 @@ if viz_surrogate:
             x_show = X[0:20].cuda()
             y_show = y[0:20].cuda()
 
-            #print("before surrogate img : ", minmax(x_show[0]))
-            #print("before surrogate t1 : ", minmax(x_show[1]))
-            #print("before surrogate t2 : ", minmax(x_show[2]))
-
             output = surrogate_net(x_show)
 
-            #print("after surrogate: ", minmax(output))
-
-        # invert normalization
+            # invert normalization
             x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
             output = [inv_norm(out).int() for out in output]
-
-            #print("after denorm: ", minmax(output))
 
             compare_images(x_show, output, name="surrogate", showTarget=True, y_show=y_show)
 
@@ -748,7 +743,7 @@ scheduler2 = lr_scheduler.CosineAnnealingLR(optimizer2, T_max=n_epochs, eta_min=
 
 
 # ----------- TRAINING -----------
-if continueVal:
+if continueVal or trained_valid:
     # Load model
     print("loading validation model")
     resnet152.load_state_dict(torch.load("validation_" + PATH))
@@ -772,7 +767,7 @@ if not trained_valid:
 
             output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
             acc = metrics.accuracy_score(cuda_np(output), cuda_np(y))
-            AUCS_train.append(acc)
+            accuracy_train.append(acc)
             vloss.append(loss.item())
             loss.backward()
             optimizer2.step()
@@ -798,8 +793,8 @@ if not trained_valid:
     winsound.Beep(500, 1000)
 
     axs = plt.subplots(2, 1)[1].ravel()
-    # plot auc score
-    axs[0].plot(AUCS_train, label='Training Accuracy', alpha=0.3)
+    # plot accuracy score
+    axs[0].plot(accuracy_train, label='Training Accuracy', alpha=0.3)
     #axs[0].plot(val_losses, label='Validation loss', alpha=0.6)
     axs[0].set_xlabel('batches')
     axs[0].legend()
@@ -818,6 +813,7 @@ predict_net = PredictNet(surrogate_net, resnet152).cuda()
 # criterion same as validateNet
 optimizer3 = opt.AdamW(predict_net.parameters(), lr=lrp)
 scheduler3 = lr_scheduler.CosineAnnealingLR(optimizer3, T_max=n_epochs, eta_min=0.001, verbose=True)
+predict_net.apply(weights_init)  # xavier init for conv2d layer weights
 
 #print(predict_net)
 #print(summary(predict_net, (1, 218, 218)))
@@ -832,7 +828,7 @@ if not trained_predict:
 
         for i, batch in enumerate(data_loader):
             X, _, z = batch
-            X, y = X.cuda(), z.cuda()    #long needed?
+            X, y = X.cuda(), z.cuda()
             X.requires_grad = True
             optimizer3.zero_grad()
             output, thresholds, contour_imgs, input_im = predict_net(X)
@@ -840,7 +836,7 @@ if not trained_predict:
 
             output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
             acc = metrics.accuracy_score(cuda_np(output), cuda_np(y))
-            AUCS_train.append(acc)
+            accuracy_train.append(acc)
             vloss.append(loss.item())
             loss.backward()
             optimizer3.step()
@@ -850,9 +846,9 @@ if not trained_predict:
             t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
             print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {t_string} \t sample thresholds : {thresholds}')
 
-        if epoch % 1 == 0:
-            #contour_imgs = [inv_norm(im).int() for im in contour_imgs]
-            #input_im = [inv_input_norm(og).int() for og in input_im]
+        if epoch % 5 == 0:
+            contour_imgs = [inv_norm(im).int() for im in contour_imgs]
+            input_im = [inv_input_norm(og).int() for og in input_im]
 
 
             compare_images(input_im, contour_imgs, name=f"predict{epoch+1}_", showTarget=False)
@@ -873,8 +869,8 @@ if not trained_predict:
     winsound.Beep(500, 1000)
 
     axs = plt.subplots(2, 1)[1].ravel()
-    # plot auc score
-    axs[0].plot(AUCS_train, label='Training Accuracy', alpha=0.3)
+    # plot accuracy score
+    axs[0].plot(accuracy_train, label='Training Accuracy', alpha=0.3)
     #axs[0].plot(val_losses, label='Validation loss', alpha=0.6)
     axs[0].set_xlabel('batches')
     axs[0].legend()
