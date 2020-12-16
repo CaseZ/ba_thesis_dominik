@@ -99,7 +99,7 @@ def cuda_np(tensor):
     return tensor.detach().numpy()
 
 
-def weights_init(m, customgain=False, freeze=False):
+def weights_init(m, customgain=False):
     if isinstance(m, nn.Conv2d):
         nn.init.xavier_normal_(m.weight.data, gain=(nn.init.calculate_gain('relu') if customgain else 1))
         #nn.init.xavier_normal_(m.bias.data)
@@ -108,11 +108,12 @@ def weights_init(m, customgain=False, freeze=False):
 def create_threshImage(img, t1, t2, blur, preprocess=True):
     img = img[0]
     if isinstance(img, torch.Tensor):
-        img = img.numpy()
+        img = cuda_np(img)
     if preprocess:
         img = (img * 255).astype(np.uint8)
 
     blurimg = torch.tensor(cv.GaussianBlur(img, (blur, blur), 0)).unsqueeze(0)
+
     buffer = torch.cat([blurimg
                         , torch.full(img.shape, t1, dtype=torch.float).unsqueeze(0)
                         , torch.full(img.shape, t2, dtype=torch.float).unsqueeze(0)
@@ -141,7 +142,6 @@ def compare_images(x_show, output, showTarget, name, y_show=None):
     for a, ax in enumerate(axs):
         im = cuda_np(output[a][0])
         x0, t1, t2 = deconstruct_input(x_show, a)
-        t1, t2 = int(t1/std), int(t2/std)
 
         ax[0].axis('off'), ax[1].axis('off')
         ax[0].imshow(x0, cmap=plt.get_cmap('gray'), interpolation='nearest')
@@ -186,10 +186,10 @@ def compare_thresholds(x_show):
         y0 = cv.Canny(x0, t1, t2)
 
         x1 = x_show[a][0].unsqueeze(0)
-        x1 = torch.cat([x1, torch.full(x1.shape, t1, dtype=torch.float, device="cuda"),
-                        torch.full(x1.shape, t2, dtype=torch.float, device="cuda")]).unsqueeze(0).cuda()
-        x1 = surrogate_net(x1)
-        x1 = inv_norm(x1.squeeze(0))
+        x1 = create_threshImage(x1, t1, t2, blur, preprocess=True)
+
+        x1 = surrogate_net(x1.unsqueeze(0).cuda()).squeeze(0)
+        x1 = inv_norm(x1)
         x1 = cuda_np(x1[0])
 
         ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
@@ -386,7 +386,8 @@ class SurrogateNet(nn.Module):
             print(" --- WARNING : not training because epoch is False or 0 --- ")
             return []
         x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
-        x_train, y_train = x_train.requires_grad(), y_train.requires_grad()
+        x_train.requires_grad=True
+        y_train.requires_grad=True
 
         x_train = x_train.float().cuda()
         y_train = y_train.float().cuda().unsqueeze(1)
@@ -479,13 +480,17 @@ class PredictNet(nn.Module):
         thresholds = self.fc(h.flatten(start_dim=1))
         thresholds = self.sig(thresholds)
 
+        # inv normalize thresholds for showing / control purpose
+        threshs = cuda_np(thresholds)
+        threshs = [(int(a*std)+bottomMargin, int(b*std)+bottomMargin) for (a, b) in threshs]
+
         h_3 = create_surrogate_input(thresholds, cuda_np(og_im))
         contour_im = self.surrogate(h_3)        # surrogate pass
 
         classes = self.validate(contour_im)     # resnet152 pass
         classes.requires_grad = True
 
-        return classes, thresholds, contour_im, h_3
+        return classes, threshs, contour_im, h_3
 
 
 class CannyDataset(Dataset):
@@ -516,8 +521,7 @@ class CannyDataset(Dataset):
 
         # create contour image (y)
         target = torch.tensor(cv.Canny(cvimg, t1, t2).astype(float))
-
-        img = create_threshImage(img, t1, t2, blur)
+        img = create_threshImage(img, t1, t2, blur, preprocess=True)
 
         if not self.addThresholds:
             # create input with image without thresholds as dimension
@@ -530,7 +534,6 @@ class CannyDataset(Dataset):
         elif normalize:     # use tnorm for img if no threshold dimensions
             img = tnorm(img.unsqueeze(0))
             target = tnorm(target.unsqueeze(0)).squeeze(0)
-
         return img, target, id
 
 
@@ -546,10 +549,10 @@ batchsize = 14
 topMargin = 400     # threshold value top margin cutoff
 bottomMargin = 150  # threshold value bottom margin cutoff
 blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing to surrogate
-n_epochs = 50       # epochs for training session
-total_eps = 50      # total epochs for saving
+n_epochs = 15       # epochs for training session
+total_eps = 15       # total epochs for saving
 
-lrs = 0.0025        # (starting) learning rate surrogate model
+lrs = 0.05           # (starting) learning rate surrogate model
 lrv = 0.005         # (starting) learning rate validation model
 lrp = 0.1           # (starting) learning rate prediction model
 
@@ -557,18 +560,18 @@ lrp = 0.1           # (starting) learning rate prediction model
 trained_surrogate = True        # if true loading model otherwise train from scratch
 continueTraining = False        # continue train when model loaded
 viz_surrogate = True            # visualize output of surrogate network
+schedule_lr = True
 
 # -- validation model control--
 trained_valid = True            # if true loading model otherwise train from scratch
 continueVal = False             # continue train when model loaded
 
 # -- prediction model control--
-predict_net = None
 trained_predict = False         # if true loading model otherwise train from scratch
 continuePredict = False         # continue train when model loaded
 
 # -- misc --
-shutdown_txt = True            # write stdout to txt and shutdown after training
+shutdown_txt = False            # write stdout to txt and shutdown after training
 saving = False                  # saving model with parameters as name
 printingClasses = False
 normalize = True                # normalizing input to [0,1]
@@ -580,19 +583,20 @@ show = False                    # show or save plots
 # -----------------------------------------
 
 if shutdown_txt:
-    sys.stdout = open(r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\console.txt', 'w')
+    sys.stdout = open(r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\PredictNet\console.txt', 'w')
 
 # #### additional declarations ####
 
 PATH = "state_dict_model_latest.pt"
 class_folder = r'C:\Users\dschm\PycharmProjects\ba_thesis\data\ImageNet\imagenet_images'
-img_folder = r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\ImageNet\_'
+img_folder = r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\PredictNet\_'
 
 train_losses, val_losses, vloss = [], [], []
 SSIM_train, SSIM_val = [], []
 accuracy_train, accuracy_val = [], []
 
 maxT = 900  # DO NOT CHANGE (maximum Canny Threshold value, depends on function and dataset)
+predict_net = None      # variable has to be initialized
 
 parameters = f"{total_eps}eps_lrs{lrs}{'_normalized' if normalize else ''}_{blur}blur_topM{topMargin}_lowM{bottomMargin}"
 print("parameters: ", parameters)
@@ -604,7 +608,8 @@ inv_norm = tf.Normalize(mean=-0., std=1/255.0)  # revert target normalization
 
 std = float(maxT - topMargin - bottomMargin)
 norm = tf.Normalize(mean=[0., bottomMargin, bottomMargin], std=[255.0, std, std])
-inv_input_norm = tf.Normalize(mean=np.negative([0., bottomMargin, bottomMargin]), std=np.reciprocal([255.0, std, std]))
+inv_input_norm = tf.Compose([tf.Normalize(mean=[0., 0., 0.], std=np.reciprocal([255.0, std, std])),
+                             tf.Normalize(mean=np.negative([0., bottomMargin, bottomMargin]), std=[1., 1., 1.])])
 
 
 # ----------- DATASET -----------
@@ -653,8 +658,9 @@ if trained_surrogate or continueTraining:
 if not trained_surrogate:
     print("training model")
     t_start = time.time()
-    optimizer = opt.SGD(surrogate_net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
-    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=0, verbose=True)
+    #optimizer = opt.SGD(surrogate_net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
+    if schedule_lr:
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=(n_epochs*0.85), eta_min=0.0001, verbose=True)
 
     for epoch in range(1, n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
@@ -667,7 +673,8 @@ if not trained_surrogate:
             t_end = time.time() - t_start  # training time
             t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
             print(f'Epoch : { epoch + 1} \t Loss : {loss:.4f} \t Time :  {t_string}')
-        scheduler.step()
+        if schedule_lr:
+            scheduler.step()
 
     # Save model
     print("saving model")
@@ -705,7 +712,6 @@ if viz_surrogate:
             y_show = y[0:20].cuda()
 
             output = surrogate_net(x_show)
-
             # invert normalization
             x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
             output = [inv_norm(out).int() for out in output]
@@ -824,6 +830,11 @@ predict_net.validate = resnet152
 #print(predict_net)
 #print(summary(predict_net, (1, 218, 218)))
 
+if continuePredict or trained_predict:
+    # Load model
+    print("loading prediction model")
+    predict_net.load_state_dict(torch.load("predict_" + PATH))
+
 if not trained_predict:
     print("training prediction model")
     t = time.time()
@@ -866,7 +877,7 @@ if not trained_predict:
 
     # Save model
     print("saving prediction model")
-    torch.save(resnet152.state_dict(), "predict_" + PATH)
+    torch.save(predict_net.state_dict(), "predict_" + PATH)
     print("saved prediction model")
     t_end = time.time() - t   # training time
     t_string = "_" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s_"
