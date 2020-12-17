@@ -99,7 +99,7 @@ def cuda_np(tensor):
     return tensor.detach().numpy()
 
 
-def weights_init(m, customgain=False):
+def weights_init(m, customgain=True):
     if isinstance(m, nn.Conv2d):
         nn.init.xavier_normal_(m.weight.data, gain=(nn.init.calculate_gain('relu') if customgain else 1))
         #nn.init.xavier_normal_(m.bias.data)
@@ -549,29 +549,31 @@ batchsize = 14
 topMargin = 400     # threshold value top margin cutoff
 bottomMargin = 150  # threshold value bottom margin cutoff
 blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing to surrogate
-n_epochs = 15       # epochs for training session
-total_eps = 15       # total epochs for saving
+n_epochs = 50       # epochs for training session
+total_eps = 50       # total epochs for saving
 
 lrs = 0.05           # (starting) learning rate surrogate model
-lrv = 0.005         # (starting) learning rate validation model
+lrv = 0.05         # (starting) learning rate validation model
 lrp = 0.1           # (starting) learning rate prediction model
 
 # -- surrogate model control--
 trained_surrogate = True        # if true loading model otherwise train from scratch
 continueTraining = False        # continue train when model loaded
 viz_surrogate = True            # visualize output of surrogate network
-schedule_lr = True
+schedule_surrogate = True
 
 # -- validation model control--
 trained_valid = True            # if true loading model otherwise train from scratch
 continueVal = False             # continue train when model loaded
+schedule_validation = True
 
 # -- prediction model control--
 trained_predict = False         # if true loading model otherwise train from scratch
 continuePredict = False         # continue train when model loaded
+schedule_predict = True
 
 # -- misc --
-shutdown_txt = False            # write stdout to txt and shutdown after training
+shutdown_txt = True            # write stdout to txt and shutdown after training
 saving = False                  # saving model with parameters as name
 printingClasses = False
 normalize = True                # normalizing input to [0,1]
@@ -659,7 +661,7 @@ if not trained_surrogate:
     print("training model")
     t_start = time.time()
     #optimizer = opt.SGD(surrogate_net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
-    if schedule_lr:
+    if schedule_surrogate:
         scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=(n_epochs*0.85), eta_min=0.0001, verbose=True)
 
     for epoch in range(1, n_epochs):
@@ -673,7 +675,7 @@ if not trained_surrogate:
             t_end = time.time() - t_start  # training time
             t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
             print(f'Epoch : { epoch + 1} \t Loss : {loss:.4f} \t Time :  {t_string}')
-        if schedule_lr:
+        if schedule_surrogate:
             scheduler.step()
 
     # Save model
@@ -743,8 +745,6 @@ resnet152.apply(weights_init)   # xavier init for conv2d layer weights
 
 criterion = nn.CrossEntropyLoss().cuda()
 optimizer2 = opt.SGD(resnet152.parameters(), lr=lrv, momentum=0.9, weight_decay=0.005, nesterov=True)
-#scheduler2 = lr_scheduler.CosineAnnealingWarmRestarts(optimizer2, T_0=5, T_mult=2, eta_min=0, last_epoch=-1, verbose=True)
-scheduler2 = lr_scheduler.CosineAnnealingLR(optimizer2, T_max=n_epochs, eta_min=0, verbose=True)
 
 # visualizing architecture
 #print(summary(resnet152, (1, 218, 178)))
@@ -760,6 +760,10 @@ if continueVal or trained_valid:
 if not trained_valid:
     print("training validation model")
     t = time.time()
+    if schedule_validation:
+        scheduler2 = lr_scheduler.CosineAnnealingLR(optimizer2, T_max=(n_epochs*0.85), eta_min=0.001, verbose=True)
+        # scheduler2 = lr_scheduler.CosineAnnealingWarmRestarts(optimizer2, T_0=5, T_mult=2, eta_min=0, last_epoch=-1, verbose=True)
+
     for epoch in range(n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
                                , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur)
@@ -779,7 +783,8 @@ if not trained_valid:
             accuracy_train.append(acc)
             vloss.append(loss.item())
             loss.backward()
-            optimizer2.step()
+            if schedule_validation:
+                optimizer2.step()
 
         if epoch % 2 == 0:
             t_end = time.time() - t  # training time
@@ -790,6 +795,7 @@ if not trained_valid:
         print(f"output : {cuda_np(output).astype(np.int)}")
         print(f"target : {cuda_np(y)}")
         print("--------------------------------------")
+
 
     # Save model
     print("saving validation model")
@@ -821,11 +827,11 @@ if not trained_valid:
 predict_net = PredictNet().cuda()
 # criterion same as validateNet
 optimizer3 = opt.AdamW(predict_net.parameters(), lr=lrp)
-scheduler3 = lr_scheduler.CosineAnnealingLR(optimizer3, T_max=n_epochs, eta_min=0.001, verbose=True)
 predict_net.apply(weights_init)  # xavier init for conv2d layer weights
 freeze(surrogate_net), freeze(resnet152)
 predict_net.surrogate = surrogate_net
 predict_net.validate = resnet152
+
 
 #print(predict_net)
 #print(summary(predict_net, (1, 218, 218)))
@@ -838,6 +844,9 @@ if continuePredict or trained_predict:
 if not trained_predict:
     print("training prediction model")
     t = time.time()
+    if schedule_predict:
+        scheduler3 = lr_scheduler.CosineAnnealingLR(optimizer3, T_max=(n_epochs*0.85), eta_min=0.001, verbose=True)
+
     for epoch in range(n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
                                , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur, noThresholds=True)
@@ -856,7 +865,8 @@ if not trained_predict:
             accuracy_train.append(acc)
             vloss.append(loss.item())
             loss.backward()
-            optimizer3.step()
+            if schedule_predict:
+                optimizer3.step()
 
         if epoch % 2 == 0:
             t_end = time.time() - t  # training time
