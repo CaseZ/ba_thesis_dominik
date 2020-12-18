@@ -166,7 +166,7 @@ def compare_images(x_show, output, showTarget, name, y_show=None):
     plt.close(fig_i)
 
 
-def compare_thresholds(x_show):
+def compare_thresholds(x_show, name):
     fig_c, axs = plt.subplots(10, 3)
 
     a = np.random.randint(0, len(X))
@@ -205,7 +205,7 @@ def compare_thresholds(x_show):
             ax[2].set_title('target')
 
     plt.subplots_adjust(top=1.0, bottom=0.0, left=0.25, right=0.5, hspace=0.01, wspace=0.05)
-    saveimg("compare_thresholds_", show)
+    saveimg(f"compare_thresholds_{name}_", show)
     plt.close(fig_c)
 
 
@@ -549,15 +549,15 @@ batchsize = 14
 topMargin = 400     # threshold value top margin cutoff
 bottomMargin = 150  # threshold value bottom margin cutoff
 blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing to surrogate
-n_epochs = 50       # epochs for training session
-total_eps = 50       # total epochs for saving
+n_epochs = 60       # epochs for training session
+total_eps = 60       # total epochs for saving
 
-lrs = 0.05           # (starting) learning rate surrogate model
+lrs = 0.1          # (starting) learning rate surrogate model
 lrv = 0.05         # (starting) learning rate validation model
 lrp = 0.1           # (starting) learning rate prediction model
 
 # -- surrogate model control--
-trained_surrogate = True        # if true loading model otherwise train from scratch
+trained_surrogate = False        # if true loading model otherwise train from scratch
 continueTraining = False        # continue train when model loaded
 viz_surrogate = True            # visualize output of surrogate network
 schedule_surrogate = True
@@ -670,11 +670,24 @@ if not trained_surrogate:
         data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
         for i, batch in enumerate(data_loader):
             X, y, _ = batch
-            output, loss = surrogate_net.train(epoch)
+            output, loss = surrogate_net.train(epoch)   # memory error in epoch 5
         if epoch % 2 == 0:
             t_end = time.time() - t_start  # training time
             t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
             print(f'Epoch : { epoch + 1} \t Loss : {loss:.4f} \t Time :  {t_string}')
+        if epoch % 5 == 0:
+            X, y, _ = batch[0:20]
+            x_show = X[0:20].cuda()
+            y_show = y[0:20].cuda()
+
+            output = surrogate_net(x_show)
+            # invert normalization
+            x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
+            output2 = [inv_norm(out).int() for out in output]
+
+            compare_images(x_show, output2, name=f"surrogate_{epoch}", showTarget=True, y_show=y_show)
+            compare_thresholds(x_show, name=f"surrogate_{epoch}")
+
         if schedule_surrogate:
             scheduler.step()
 
@@ -720,7 +733,7 @@ if viz_surrogate:
 
             compare_images(x_show, output, name="surrogate", showTarget=True, y_show=y_show)
 
-            compare_thresholds(x_show)
+            compare_thresholds(x_show, name="surrogate")
 
     # visualize last output of network
     '''
@@ -761,7 +774,7 @@ if not trained_valid:
     print("training validation model")
     t = time.time()
     if schedule_validation:
-        scheduler2 = lr_scheduler.CosineAnnealingLR(optimizer2, T_max=(n_epochs*0.85), eta_min=0.001, verbose=True)
+        scheduler2 = lr_scheduler.CosineAnnealingLR(optimizer2, T_max=(n_epochs*0.85), eta_min=0.0001, verbose=True)
         # scheduler2 = lr_scheduler.CosineAnnealingWarmRestarts(optimizer2, T_0=5, T_mult=2, eta_min=0, last_epoch=-1, verbose=True)
 
     for epoch in range(n_epochs):
