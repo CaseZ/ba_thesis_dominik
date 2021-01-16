@@ -100,7 +100,7 @@ def cuda_np(tensor):
 
 
 def weights_init(m, customgain=True):
-    if isinstance(m, nn.Conv2d):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
         nn.init.xavier_normal_(m.weight.data, gain=(nn.init.calculate_gain('relu') if customgain else 1))
         #nn.init.xavier_normal_(m.bias.data)
 
@@ -112,11 +112,11 @@ def create_threshImage(img, t1, t2, blur, preprocess=True):
     if preprocess:
         img = (img * 255).astype(np.uint8)
 
-    blurimg = torch.tensor(cv.GaussianBlur(img, (blur, blur), 0)).unsqueeze(0)
+    blurimg = torch.tensor(cv.GaussianBlur(img, (blur, blur), 0), device="cuda").unsqueeze(0)
 
     buffer = torch.cat([blurimg
-                        , torch.full(img.shape, t1, dtype=torch.float).unsqueeze(0)
-                        , torch.full(img.shape, t2, dtype=torch.float).unsqueeze(0)
+                        , torch.full(img.shape, t1, dtype=torch.float, device="cuda").unsqueeze(0)
+                        , torch.full(img.shape, t2, dtype=torch.float, device="cuda").unsqueeze(0)
                      ], dim=0)
     return buffer
 
@@ -124,28 +124,33 @@ def create_threshImage(img, t1, t2, blur, preprocess=True):
 def create_surrogate_input(h, img):
     new_h = []
     for i, thresh in enumerate(cuda_np(h)):
-        new_h.append(create_threshImage(np.float32([img[i]]), thresh[0], thresh[1], blur, preprocess=False).cuda().unsqueeze(0))
+        new_h.append(create_threshImage(np.float32([img[i]]), thresh[0], thresh[1], blur, preprocess=False).unsqueeze(0))
     return torch.cat(new_h).squeeze(2)
 
 
 def deconstruct_input(input, index):
     image = (cuda_np(input[index][0]))
-    t1, t2 = int(cuda_np(input[index][1][0][0])), int(cuda_np(input[index][2][0][0]))
+    if image.shape == (218, 218):
+        t1, t2 = 0, 0
+    else:
+        t1, t2 = int(cuda_np(input[index][1][0][0])), int(cuda_np(input[index][2][0][0]))
     return image, t1, t2
 
 
-def compare_images(x_show, output, showTarget, name, y_show=None):
+def compare_images(x_show, output, showTarget, name, threshs=None, y_show=None, nr=6):
 
     dim = 3 if showTarget else 2
-    fig_i, axs = plt.subplots(6, dim)
+    fig_i, axs = plt.subplots(nr, dim)
 
     for a, ax in enumerate(axs):
         im = cuda_np(output[a][0])
         x0, t1, t2 = deconstruct_input(x_show, a)
+        if threshs:
+            t1, t2 = threshs[a][0], threshs[a][1]
 
         ax[0].axis('off'), ax[1].axis('off')
         ax[0].imshow(x0, cmap=plt.get_cmap('gray'), interpolation='nearest')
-        ax[0].set_title('Thresholds: ' + str(t1) + ' and ' + str(t2))
+        #ax[0].set_title(f'{str(t1)} and {str(t2)}')
         ax[1].imshow(im, cmap=plt.get_cmap('gray'), interpolation='nearest')
 
         # set column header
@@ -155,7 +160,11 @@ def compare_images(x_show, output, showTarget, name, y_show=None):
         if showTarget:
             ax[2].axis('off')
             y0 = (cuda_np(y_show[a])).astype(np.uint8)
+            err = metrics.mean_squared_error(im, y0)/255
+            IQ1 = piq.ssim((output[a][0]).type(torch.FloatTensor), y_show[a].type(torch.FloatTensor), data_range=1.)
+            IQ2 = piq.gmsd((output[a][0]).type(torch.FloatTensor), y_show[a].type(torch.FloatTensor), data_range=1.)
             ax[2].imshow(y0, cmap=plt.get_cmap('gray'), interpolation='nearest')
+            ax[2].set_title(f'mse: {err:.2f}, ssim: {IQ1:.5f}, GMSD: {IQ2:.5f}')
 
             # set column header
             if a == 0:
@@ -166,8 +175,8 @@ def compare_images(x_show, output, showTarget, name, y_show=None):
     plt.close(fig_i)
 
 
-def compare_thresholds(x_show, name):
-    fig_c, axs = plt.subplots(10, 3)
+def compare_thresholds(x_show, name, nr=8):
+    fig_c, axs = plt.subplots(nr, 3)
 
     a = np.random.randint(0, len(X))
     step = (((900 - topMargin) - bottomMargin) / len(axs))
@@ -188,7 +197,8 @@ def compare_thresholds(x_show, name):
         x1 = x_show[a][0].unsqueeze(0)
         x1 = create_threshImage(x1, t1, t2, blur, preprocess=True)
 
-        x1 = surrogate_net(x1.unsqueeze(0).cuda()).squeeze(0)
+        with torch.no_grad():
+            x1 = surrogate_net(x1.unsqueeze(0), rounding=False).squeeze(0)
         x1 = inv_norm(x1)
         x1 = cuda_np(x1[0])
 
@@ -331,6 +341,7 @@ class SurrogateNet(nn.Module):
             nn.BatchNorm2d(1),
             nn.ReLU(inplace=True),
         )
+        # add upsample to ensure always same output
         '''
         self.deconv1 = nn.Sequential(
             nn.Conv2d(128, 64, kernel_size=5, stride=1, padding=2),
@@ -359,7 +370,7 @@ class SurrogateNet(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def forward(self, h):
+    def forward(self, h, rounding=False):
 
         h = self.conv1(h)
         h = self.conv2(h)
@@ -379,30 +390,33 @@ class SurrogateNet(nn.Module):
         h = self.sConv1(h)
         h = self.sConv2(h)
 
+        if rounding:
+            h = torch.round(h)  # rounding output for high contrast picture
+
         return h
 
-    def train(self, epoch=False):
+    def train(self, optimizer_internal, epoch=False):
         if epoch == False:
             print(" --- WARNING : not training because epoch is False or 0 --- ")
             return []
         x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
-        x_train.requires_grad=True
-        y_train.requires_grad=True
+        #x_train.requires_grad = True
+        #y_train.requires_grad = True
 
         x_train = x_train.float().cuda()
         y_train = y_train.float().cuda().unsqueeze(1)
         x_val = x_val.float().cuda()
         y_val = y_val.float().cuda().unsqueeze(1)
-        x_val.requires_grad = False
-        y_val.requires_grad = False
+        #x_val.requires_grad = False
+        #y_val.requires_grad = False
 
         # clearing the Gradients of the model parameters
-        optimizer.zero_grad()
+        optimizer_internal.zero_grad()
 
         # prediction for training and validation set
-        output_train = surrogate_net(x_train)
+        output_train = self.forward(x_train)
         with torch.no_grad():
-            output_val = surrogate_net(x_val)
+            output_val = self.forward(x_val)
 
         # computing the training and validation loss
         loss_train = criterion(output_train, y_train)
@@ -416,11 +430,14 @@ class SurrogateNet(nn.Module):
         ssim_val = piq.ssim(output_val, y_val, data_range=1.)
         SSIM_train.append(cuda_np(ssim_train))
         SSIM_val.append(cuda_np(ssim_val))
+        del ssim_train, ssim_val, output_train
 
         # computing the updated weights of all the model parameters
         loss_train.backward()
-        optimizer.step()
-        return output_train, loss_train.item()
+        loss = loss_train.item()
+        del loss_train
+        optimizer_internal.step()
+        return loss
 
 
 class PredictNet(nn.Module):
@@ -460,13 +477,12 @@ class PredictNet(nn.Module):
         self.sig.requires_grad=False
 
         if surrogate is not None:
-            freeze(validate)
+            freeze(surrogate)
             self.surrogate = surrogate
 
         if validate is not None:
-            freeze(validate)
+            #freeze(validate)
             self.validate = validate
-
 
     def forward(self, h):
         og_im = h           # save original input image
@@ -485,12 +501,139 @@ class PredictNet(nn.Module):
         threshs = [(int(a*std)+bottomMargin, int(b*std)+bottomMargin) for (a, b) in threshs]
 
         h_3 = create_surrogate_input(thresholds, cuda_np(og_im))
-        contour_im = self.surrogate(h_3)        # surrogate pass
+        contour_im = self.surrogate(h_3, rounding=False)        # surrogate pass
 
-        classes = self.validate(contour_im)     # resnet152 pass
-        classes.requires_grad = True
+        classes = self.validate(contour_im)     # validation pass
 
         return classes, threshs, contour_im, h_3
+
+
+class Decoder(nn.Module):
+    def __init__(self, surrogate=None, validate=None):
+        super(Decoder, self).__init__()
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=9, stride=1, padding=4),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=4, stride=2, padding=1)
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=5, stride=2, padding=1)
+        )
+
+        #self.ResLayer1 = ResNetLayer(128, 128, n=9, expansion=1)
+        #self.ResLayer2 = ResNetLayer(128, 256, n=9, expansion=1)
+        #self.ResLayer3 = ResNetLayer(256, 256, n=9, expansion=1)
+        self.sConv3 = nn.Sequential(
+            nn.Conv2d(128, 128, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+        )
+
+        self.sConv4 = nn.Sequential(
+            nn.Conv2d(128, 128, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+        )
+
+        # transposed convolution
+        self.deconv3 = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2, padding=0),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+        )
+        self.deconv1 = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=0),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
+        self.deconv2 = nn.Sequential(
+            nn.ConvTranspose2d(64, 1, kernel_size=2, stride=2, padding=0),
+            nn.BatchNorm2d(1),
+            nn.ReLU(inplace=True),
+        )
+        # add upsample to ensure always same output
+
+        # same-convolution after upsampling / deconvoluting
+        self.sConv1 = nn.Sequential(
+            nn.Conv2d(1, 1, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(1),
+            nn.ReLU(inplace=True),
+        )
+
+        self.sConv2 = nn.Sequential(
+            nn.Conv2d(1, 1, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(1),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, h):
+
+        h = self.conv1(h)
+        h = self.conv2(h)
+
+        # Residual Layers
+        #h = self.ResLayer1(h)
+        #h = self.ResLayer2(h)
+        #h = self.ResLayer3(h)
+
+        # starting deconvolution
+        #h = self.deconv3(h)
+        h = self.deconv1(h)
+        h = self.deconv2(h)
+        h = self.sConv1(h)
+        h = self.sConv2(h)
+
+        return h
+
+    def train(self, optimizer_internal, epoch=False):
+        if epoch == False:
+            print(" --- WARNING : not training because epoch is False or 0 --- ")
+            return []
+        x_train, x_val, y_train, y_val = train_test_split(X, y, test_size=0.33, random_state=42)
+        #print(x_train)
+        #x_train.requires_grad = True
+        #y_train.requires_grad = True
+
+        x_train = x_train.float().cuda()
+        y_train = y_train.float().cuda().unsqueeze(1)
+        x_val = x_val.float().cuda()
+        y_val = y_val.float().cuda().unsqueeze(1)
+        #x_val.requires_grad = False
+        #y_val.requires_grad = False
+
+        # clearing the Gradients of the model parameters
+        optimizer_internal.zero_grad()
+        # prediction for training and validation set
+        output_train = self.forward(x_train)
+        with torch.no_grad():
+            output_val = self.forward(x_val)
+
+        # computing the training and validation loss
+        loss_train = -criterion(output_train, y_train)
+        with torch.no_grad():
+            loss_val = -criterion(output_val, y_val)
+        train_losses.append(cuda_np(loss_train))
+        val_losses.append(cuda_np(loss_val))
+
+        # SSIM loss
+        ssim_train = piq.ssim(output_train, y_train, data_range=1.)
+        ssim_val = piq.ssim(output_val, y_val, data_range=1.)
+        SSIM_train.append(cuda_np(ssim_train))
+        SSIM_val.append(cuda_np(ssim_val))
+        del ssim_train, ssim_val
+
+        # computing the updated weights of all the model parameters
+        loss_train.backward()
+        loss = loss_train.item()
+        del loss_train
+        optimizer_internal.step()
+        return output_train, loss
+
 
 
 class CannyDataset(Dataset):
@@ -522,7 +665,6 @@ class CannyDataset(Dataset):
         # create contour image (y)
         target = torch.tensor(cv.Canny(cvimg, t1, t2).astype(float))
         img = create_threshImage(img, t1, t2, blur, preprocess=True)
-
         if not self.addThresholds:
             # create input with image without thresholds as dimension
             img = img[0]
@@ -545,35 +687,37 @@ torch.cuda.empty_cache()
 # -----------------------------------------
 
 duplicates = None   # optional
-batchsize = 14
 topMargin = 400     # threshold value top margin cutoff
 bottomMargin = 150  # threshold value bottom margin cutoff
 blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing to surrogate
-n_epochs = 60       # epochs for training session
-total_eps = 60       # total epochs for saving
+n_epochs = 10       # epochs for training session
+total_eps = 10      # total epochs for saving
 
-lrs = 0.1          # (starting) learning rate surrogate model
-lrv = 0.05         # (starting) learning rate validation model
+lrs = 0.1           # (starting) learning rate surrogate model
+lrv = 0.1           # (starting) learning rate validation model
 lrp = 0.1           # (starting) learning rate prediction model
 
 # -- surrogate model control--
-trained_surrogate = False        # if true loading model otherwise train from scratch
-continueTraining = False        # continue train when model loaded
+batchsize_surrogate = 23        # batchsize for surrogate training
+train_surrogate = True          # if true loading model otherwise train from scratch
+load_surrogate = False          # continue train when model loaded
+schedule_surrogate = True       # use learning rate scheduler
 viz_surrogate = True            # visualize output of surrogate network
-schedule_surrogate = True
 
 # -- validation model control--
-trained_valid = True            # if true loading model otherwise train from scratch
-continueVal = False             # continue train when model loaded
-schedule_validation = True
+batchsize_validation = 10       # batchsize for validation training
+train_valid = False             # if true loading model otherwise train from scratch
+load_valid = False              # continue train when model loaded
+schedule_valid = True           # use learning rate scheduler
 
 # -- prediction model control--
-trained_predict = False         # if true loading model otherwise train from scratch
-continuePredict = False         # continue train when model loaded
-schedule_predict = True
+batchsize_predict = 10          # batchsize for predict training
+train_predict = False           # if true loading model otherwise train from scratch
+load_predict = False            # continue train when model loaded
+schedule_predict = True         # use learning rate scheduler
 
 # -- misc --
-shutdown_txt = True            # write stdout to txt and shutdown after training
+shutdown_txt = False            # write stdout to txt and shutdown after training
 saving = False                  # saving model with parameters as name
 printingClasses = False
 normalize = True                # normalizing input to [0,1]
@@ -585,13 +729,13 @@ show = False                    # show or save plots
 # -----------------------------------------
 
 if shutdown_txt:
-    sys.stdout = open(r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\PredictNet\console.txt', 'w')
+    sys.stdout = open(r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\Decoder\console.txt', 'w')
 
 # #### additional declarations ####
 
 PATH = "state_dict_model_latest.pt"
 class_folder = r'C:\Users\dschm\PycharmProjects\ba_thesis\data\ImageNet\imagenet_images'
-img_folder = r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\PredictNet\_'
+img_folder = r'C:\Users\dschm\Uni\Uni\BA Thesis\normalized\Decoder\_'
 
 train_losses, val_losses, vloss = [], [], []
 SSIM_train, SSIM_val = [], []
@@ -617,7 +761,8 @@ inv_input_norm = tf.Compose([tf.Normalize(mean=[0., 0., 0.], std=np.reciprocal([
 # ----------- DATASET -----------
 ImageNet_data = \
     tv.datasets.ImageFolder(root='./data/ImageNet/imagenet_images'
-                            , transform=tf.Compose([tf.transforms.Grayscale(1)
+                            , transform=tf.Compose([     tf.ColorJitter(0, (0, 2.5), 0, 0)
+                                                       , tf.transforms.Grayscale(1)
                                                        , tf.Resize(256)     # resize to smallest dimension first
                                                        , tf.CenterCrop(218)
                                                        , tf.ToTensor()
@@ -633,17 +778,14 @@ if duplicates:
         print(f"new length of dataset: {len(dataset)}  ##  (old length: {oldLength})")
 
 classes = createClassDict(class_folder, printingClasses)
-dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
-                       , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur)
-data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
-
 
 
 # ################################# SURROGATE MODEL ##################################
 
 criterion = nn.MSELoss().cuda()  # nn.SmoothL1Loss().cuda()
 surrogate_net = SurrogateNet().cuda()
-optimizer = opt.AdamW(surrogate_net.parameters(), lr=lrs)
+optimizer = opt.SGD(surrogate_net.parameters(), lr=lrs, momentum=0.9, weight_decay=0.005, nesterov=True)
+#opt.AdamW(surrogate_net.parameters(), lr=lrs)
 surrogate_net.apply(weights_init)  # xavier init for conv2d layer weights
 
 # visualizing architecture
@@ -652,14 +794,15 @@ surrogate_net.apply(weights_init)  # xavier init for conv2d layer weights
 
 
 # ----------- TRAINING -----------
-if trained_surrogate or continueTraining:
-    print("loading model")
+if load_surrogate:
+    print("loading surrogate model")
     surrogate_net.load_state_dict(torch.load(PATH))
     surrogate_net.eval()
 
-if not trained_surrogate:
-    print("training model")
+if train_surrogate:
+    print("training surrogate model")
     t_start = time.time()
+    print(f"starting time : {time.strftime('%H:%M:%S', time.localtime())}")
     #optimizer = opt.SGD(surrogate_net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
     if schedule_surrogate:
         scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=(n_epochs*0.85), eta_min=0.0001, verbose=True)
@@ -667,30 +810,32 @@ if not trained_surrogate:
     for epoch in range(1, n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
                                , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur)
-        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
+        data_loader = DataLoader(dataset, batch_size=batchsize_surrogate, shuffle=True, drop_last=True)
         for i, batch in enumerate(data_loader):
             X, y, _ = batch
-            output, loss = surrogate_net.train(epoch)   # memory error in epoch 5
-        if epoch % 2 == 0:
+            loss = surrogate_net.train(optimizer, epoch)
+        if epoch % 1 == 0:
             t_end = time.time() - t_start  # training time
             t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
             print(f'Epoch : { epoch + 1} \t Loss : {loss:.4f} \t Time :  {t_string}')
-        if epoch % 5 == 0:
+        if epoch in [0,1,2,3,4,5,6,7,8,9] or (epoch % 5 == 0):
             X, y, _ = batch[0:20]
             x_show = X[0:20].cuda()
             y_show = y[0:20].cuda()
 
-            output = surrogate_net(x_show)
+            with torch.no_grad():
+                output = surrogate_net(x_show)
             # invert normalization
             x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
             output2 = [inv_norm(out).int() for out in output]
 
-            compare_images(x_show, output2, name=f"surrogate_{epoch}", showTarget=True, y_show=y_show)
-            compare_thresholds(x_show, name=f"surrogate_{epoch}")
+            compare_images(x_show, output2, name=f"surrogate_{epoch}", showTarget=True, y_show=y_show, nr=7)
+            compare_thresholds(x_show, name=f"surrogate_{epoch}", nr=7)
 
         if schedule_surrogate:
             scheduler.step()
 
+    print(f"end time : {time.strftime('%H:%M:%S', time.localtime())}")
     # Save model
     print("saving model")
     if saving:
@@ -726,12 +871,12 @@ if viz_surrogate:
             x_show = X[0:20].cuda()
             y_show = y[0:20].cuda()
 
-            output = surrogate_net(x_show)
+            output = surrogate_net(x_show, rounding=True)
             # invert normalization
             x_show, y_show = [inv_input_norm(x).int() for x in x_show], [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
             output = [inv_norm(out).int() for out in output]
 
-            compare_images(x_show, output, name="surrogate", showTarget=True, y_show=y_show)
+            compare_images(x_show, output, name="surrogate", showTarget=True, y_show=y_show, nr=batchsize_surrogate)
 
             compare_thresholds(x_show, name="surrogate")
 
@@ -746,7 +891,7 @@ if viz_surrogate:
     '''
 
 
-# ################################ VALIDATION MODEL #################################
+'''
 
 resnet152 = tv.models.resnet152()
 # change first and last layer for 1d input and output class length
@@ -756,63 +901,89 @@ resnet152 = resnet152.cuda()
 resnet152.train()
 resnet152.apply(weights_init)   # xavier init for conv2d layer weights
 
-criterion = nn.CrossEntropyLoss().cuda()
-optimizer2 = opt.SGD(resnet152.parameters(), lr=lrv, momentum=0.9, weight_decay=0.005, nesterov=True)
+val_net = resnet152
+'''
+# ################################ VALIDATION MODEL #################################
+
+val_net = Decoder().cuda()
+val_net.conv1 = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=9, stride=1, padding=4),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=4, stride=2, padding=1)
+        ).cuda()
+val_net.train(None)
+val_net.apply(weights_init)   # xavier init for conv2d layer weights
+
+criterion = nn.MSELoss().cuda()     #piq.SSIMLoss()
+optimizer2 = opt.AdamW(surrogate_net.parameters(), lr=lrv)
+# opt.SGD(val_net.parameters(), lr=lrv, momentum=0.9, weight_decay=0.005, nesterov=True)
+
+freeze(surrogate_net)   # freeze surrogate
 
 # visualizing architecture
-#print(summary(resnet152, (1, 218, 178)))
-#render(surrogate_net, path='data/graph_minimal')
-
+#print(summary(val_net, (1, 218, 178)))
+#render(val_net, path='data/graph_val_minimal')
 
 # ----------- TRAINING -----------
-if continueVal or trained_valid:
+if load_valid:
     # Load model
     print("loading validation model")
-    resnet152.load_state_dict(torch.load("validation_" + PATH))
+    val_net.load_state_dict(torch.load("validation_" + PATH))
 
-if not trained_valid:
+if train_valid:
     print("training validation model")
     t = time.time()
-    if schedule_validation:
+    if schedule_valid:
         scheduler2 = lr_scheduler.CosineAnnealingLR(optimizer2, T_max=(n_epochs*0.85), eta_min=0.0001, verbose=True)
         # scheduler2 = lr_scheduler.CosineAnnealingWarmRestarts(optimizer2, T_0=5, T_mult=2, eta_min=0, last_epoch=-1, verbose=True)
 
-    for epoch in range(n_epochs):
+    for epoch in range(1, n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
                                , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur)
-        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
+        data_loader = DataLoader(dataset, batch_size=batchsize_validation, shuffle=True, drop_last=True)
 
         for i, batch in enumerate(data_loader):
-            X, _, z = batch
-            X, y = surrogate_net(X.cuda()), z.cuda()
-            X, y = autog.Variable(X), autog.Variable(y)
+            X, _, _ = batch
+            # surrogate is input, normal image is target
+            y = X.narrow(1, 0, 1).squeeze()
+            X = surrogate_net(X.cuda(), rounding=False)
+            output, loss = val_net.train(optimizer2, epoch)
+            #if i % 100 == 0:
+            #    print("batch : ", i)
 
-            optimizer2.zero_grad()
-            output = resnet152(X)
-            loss = criterion(output, y)
+        if epoch%1 == 0:    # epoch % 5 == 0
+            X, _, _ = batch[0:20]
+            y = X.narrow(1, 0, 1).squeeze()
+            X = surrogate_net(X.cuda())
 
-            output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
-            acc = metrics.accuracy_score(cuda_np(output), cuda_np(y))
-            accuracy_train.append(acc)
-            vloss.append(loss.item())
-            loss.backward()
-            if schedule_validation:
-                optimizer2.step()
+            x_show = X[0:20].cuda()
+            y_show = y[0:20].cuda()
 
-        if epoch % 2 == 0:
+            output = val_net(x_show)
+
+            # invert normalization
+            x_show, y_show = [inv_norm(x.unsqueeze(0)).squeeze(0).int() for x in x_show]\
+                , [inv_norm(y.unsqueeze(0)).squeeze(0).int() for y in y_show]
+            output2 = [inv_norm(out).int() for out in output]
+
+            compare_images(x_show, output2, name=f"validate_{epoch}", showTarget=True, y_show=y_show, nr=batchsize_validation)
+            #compare_thresholds(x_show, name=f"validate_{epoch}")
+
+        if epoch % 1 == 0:
             t_end = time.time() - t  # training time
             t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
-            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {t_string}')
+            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Time :  {t_string}')
 
         scheduler2.step()
-        print(f"output : {cuda_np(output).astype(np.int)}")
-        print(f"target : {cuda_np(y)}")
+        print(f"output : {cuda_np(output[0][0][150]).astype(np.int)}")
+        #print(f"target : {cuda_np(y)}")
         print("--------------------------------------")
 
 
     # Save model
     print("saving validation model")
-    torch.save(resnet152.state_dict(), "validation_" + PATH)
+    torch.save(val_net.state_dict(), "validation_" + PATH)
     print("saved validation model")
     t_end = time.time() - t   # training time
     t_string = "_" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s_"
@@ -822,16 +993,17 @@ if not trained_valid:
 
     axs = plt.subplots(2, 1)[1].ravel()
     # plot accuracy score
-    axs[0].plot(accuracy_train, label='Training Accuracy', alpha=0.3)
-    #axs[0].plot(val_losses, label='Validation loss', alpha=0.6)
+    axs[0].plot(train_losses, label='Training loss', alpha=0.3)
+    axs[0].plot(val_losses, label='Validation loss', alpha=0.6)
     axs[0].set_xlabel('batches')
     axs[0].legend()
 
     # plot loss
-    axs[1].plot(vloss, label='Training loss', alpha=0.3)
-    #axs[0].plot(val_losses, label='Validation loss', alpha=0.6)
+    axs[1].plot(SSIM_train, label='Training SSIM', alpha=0.3)
+    axs[1].plot(SSIM_val, label='Validation SSIM', alpha=0.6)
     axs[1].set_xlabel('batches')
     axs[1].legend()
+    plt.subplots_adjust(top=1.0)
     saveimg("valmodel_loss_", show)
 
 
@@ -839,22 +1011,23 @@ if not trained_valid:
 
 predict_net = PredictNet().cuda()
 # criterion same as validateNet
+
 optimizer3 = opt.AdamW(predict_net.parameters(), lr=lrp)
 predict_net.apply(weights_init)  # xavier init for conv2d layer weights
-freeze(surrogate_net), freeze(resnet152)
+freeze(surrogate_net), #freeze(val_net)
 predict_net.surrogate = surrogate_net
-predict_net.validate = resnet152
+predict_net.validate = val_net
 
 
 #print(predict_net)
 #print(summary(predict_net, (1, 218, 218)))
 
-if continuePredict or trained_predict:
+if load_predict:
     # Load model
     print("loading prediction model")
     predict_net.load_state_dict(torch.load("predict_" + PATH))
 
-if not trained_predict:
+if train_predict:
     print("training prediction model")
     t = time.time()
     if schedule_predict:
@@ -863,39 +1036,43 @@ if not trained_predict:
     for epoch in range(n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
                                , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur, noThresholds=True)
-        data_loader = DataLoader(dataset, batch_size=batchsize, shuffle=True, drop_last=True)
+        data_loader = DataLoader(dataset, batch_size=batchsize_predict, shuffle=True, drop_last=True)
 
         for i, batch in enumerate(data_loader):
-            X, _, z = batch
-            X, y = X.cuda(), z.cuda()
-            X.requires_grad = True
+            X, _, _ = batch
+            # surrogate is input, normal image is target
+            y = X.narrow(1, 0, 1).cuda() #.squeeze()
+            X = X.cuda()
             optimizer3.zero_grad()
             output, thresholds, contour_imgs, input_im = predict_net(X)
-            loss = criterion(output, y)
+            train_loss = criterion(output, y)
+            loss = train_loss.item()
+            del train_loss
 
-            output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
-            acc = metrics.accuracy_score(cuda_np(output), cuda_np(y))
+            #output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
+            #acc = metrics.accuracy_score(cuda_np(output), cuda_np(y))
+            acc = piq.ssim(output.detach(), y.detach(), data_range=1.)
             accuracy_train.append(acc)
-            vloss.append(loss.item())
+            vloss.append(loss)
             loss.backward()
             if schedule_predict:
                 optimizer3.step()
 
-        if epoch % 2 == 0:
+        if epoch % 1 == 0:
             t_end = time.time() - t  # training time
             t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
             print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {t_string} \t sample thresholds : {thresholds}')
 
-        if epoch % 5 == 0:
+        if epoch % 1 == 0:
             contour_imgs = [inv_norm(im).int() for im in contour_imgs]
             input_im = [inv_input_norm(og).int() for og in input_im]
 
 
-            compare_images(input_im, contour_imgs, name=f"predict{epoch+1}_", showTarget=False)
+            compare_images(input_im, contour_imgs, name=f"predict{epoch+1}_", threshs=thresholds, showTarget=False, nr=batchsize_predict)
 
         scheduler3.step()
-        print(f"output : {cuda_np(output).astype(np.int)}")
-        print(f"target : {cuda_np(y)}")
+        #print(f"output : {cuda_np(output).astype(np.int)}")
+        #print(f"target : {cuda_np(y)}")
         print("--------------------------------------")
 
     # Save model
