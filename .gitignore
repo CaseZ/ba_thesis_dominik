@@ -6,3 +6,20 @@ state_dict_model_latest - 9x5_50eps_0.005.pt
 *.mp3
 *.pt
 data/ImageNet/imagenet_images/ground ivy/2439871429_307bf6d1d7.jpg%3Fv%3D0
+*.gz
+data/mnist/FashionMNIST/raw/t10k-images-idx3-ubyte
+data/mnist/FashionMNIST/raw/t10k-labels-idx1-ubyte
+data/mnist/FashionMNIST/raw/train-images-idx3-ubyte
+data/mnist/FashionMNIST/raw/train-labels-idx1-ubyte
+data/mnist/MNIST/raw/t10k-images-idx3-ubyte
+data/mnist/MNIST/raw/t10k-labels-idx1-ubyte
+data/mnist/MNIST/raw/train-images-idx3-ubyte
+data/mnist/MNIST/raw/train-labels-idx1-ubyte
+data/mnist/FashionMNIST/raw/t10k-images-idx3-ubyte
+data/mnist/FashionMNIST/raw/t10k-labels-idx1-ubyte
+data/mnist/FashionMNIST/raw/train-images-idx3-ubyte
+data/mnist/FashionMNIST/raw/train-labels-idx1-ubyte
+data/mnist/MNIST/raw/t10k-images-idx3-ubyte
+data/mnist/MNIST/raw/t10k-labels-idx1-ubyte
+data/mnist/MNIST/raw/train-images-idx3-ubyte
+data/mnist/MNIST/raw/train-labels-idx1-ubyte

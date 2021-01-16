@@ -11,9 +11,9 @@ import os   # instead conda install nomkl
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 ### temporary ###
 
-fmnist_data = tv.datasets.FashionMNIST(root='./data/FashionMNIST', train=True, transform=tf.Compose([tf.ToTensor()]),
+mnist_data = tv.datasets.MNIST(root='./data/MNIST', train=True, transform=tf.Compose([tf.ToTensor()]),
                                        target_transform=None, download=True)
-data_loader = torch.utils.data.DataLoader(fmnist_data, batch_size=32, shuffle=True, drop_last=True)
+data_loader = torch.utils.data.DataLoader(mnist_data, batch_size=10, shuffle=False, drop_last=True)
 
 labels = {0: 'T-shirt/top', 1: 'Trouser', 2: 'Pullover', 3: 'Dress', 4: 'Coat', 5: 'Sandal', 6: 'Shirt', 7: 'Sneaker', 8: 'Bag', 9: 'Ankle boot'}
 
@@ -54,9 +54,21 @@ for i, batch in enumerate(data_loader):
 #im2 = cv.imread(r'F:\Users\Dominik\Pictures\Orbception Warframe (bug).png')
 
 # try different threshold values
-'''
 
 
+fig, axs = plt.subplots(nrows=1, ncols=10, figsize=(16, 6), sharex=True, sharey=True)
+
+for i, batch in enumerate(data_loader):
+    if i < 10:
+        x, y = batch
+        print(i)
+        x = (np.reshape(x[0].numpy(), (28, 28))*255).astype(np.uint8)
+        axs[i].imshow(x, cmap=plt.cm.gray)
+        axs[i].axis('off')
+fig.tight_layout()
+plt.show()
+
+'''       
 # Compute the Canny filter for two values of sigma
 sigl, sigh = 100, 200
 edges1 = cv.Canny(x0, 10, 20)
