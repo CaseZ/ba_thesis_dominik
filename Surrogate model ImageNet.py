@@ -8,7 +8,6 @@ from sklearn import metrics
 import torch
 import torch.nn as nn
 import torch.optim as opt
-import torch.autograd as autog
 import torchvision as tv
 import gc
 
@@ -21,8 +20,8 @@ import piq
 import hiddenlayer as hl
 import winsound
 import os
-import time
 import sys
+import time
 
 # ## temporary ###
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"    # instead conda install nomkl
@@ -45,6 +44,18 @@ def conv_bn(in_channels, out_channels, conv, *args, **kwargs):
     return nn.Sequential(OrderedDict({'conv': conv(in_channels, out_channels, *args, **kwargs),
                                       'bn': nn.BatchNorm2d(out_channels)
                                       }))
+
+
+def get_time(seconds=True):
+    if seconds:
+        return time.mktime(time.localtime())
+    else:
+        return time.strftime('%T', time.localtime())
+
+
+def time_elapsed(t0):
+    t_delta = get_time(True) - t0
+    return time.strftime("%T", time.gmtime(t_delta))
 
 
 def list_shape(x):
@@ -130,10 +141,10 @@ def create_surrogate_input(h, img):
 
 def deconstruct_input(input, index):
     image = (cuda_np(input[index][0]))
-    if image.shape == (218, 218):
-        t1, t2 = 0, 0
-    else:
+    if image.shape == (3, 218, 218):
         t1, t2 = int(cuda_np(input[index][1][0][0])), int(cuda_np(input[index][2][0][0]))
+    else:
+        t1, t2 = 0, 0
     return image, t1, t2
 
 
@@ -150,7 +161,7 @@ def compare_images(x_show, output, showTarget, name, threshs=None, y_show=None, 
 
         ax[0].axis('off'), ax[1].axis('off')
         ax[0].imshow(x0, cmap=plt.get_cmap('gray'), interpolation='nearest')
-        #ax[0].set_title(f'{str(t1)} and {str(t2)}')
+        ax[0].set_title(f'{str(t1)} and {str(t2)}')
         ax[1].imshow(im, cmap=plt.get_cmap('gray'), interpolation='nearest')
 
         # set column header
@@ -164,7 +175,7 @@ def compare_images(x_show, output, showTarget, name, threshs=None, y_show=None, 
             IQ1 = piq.ssim((output[a][0]).type(torch.FloatTensor), y_show[a].type(torch.FloatTensor), data_range=1.)
             IQ2 = piq.gmsd((output[a][0]).type(torch.FloatTensor), y_show[a].type(torch.FloatTensor), data_range=1.)
             ax[2].imshow(y0, cmap=plt.get_cmap('gray'), interpolation='nearest')
-            ax[2].set_title(f'mse: {err:.2f}, ssim: {IQ1:.5f}, GMSD: {IQ2:.5f}')
+            #ax[2].set_title(f'mse: {err:.2f}, ssim: {IQ1:.5f}, GMSD: {IQ2:.5f}')
 
             # set column header
             if a == 0:
@@ -693,7 +704,7 @@ blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing
 n_epochs = 10       # epochs for training session
 total_eps = 10      # total epochs for saving
 
-lrs = 0.1           # (starting) learning rate surrogate model
+lrs = 0.5          # (starting) learning rate surrogate model
 lrv = 0.1           # (starting) learning rate validation model
 lrp = 0.1           # (starting) learning rate prediction model
 
@@ -801,23 +812,24 @@ if load_surrogate:
 
 if train_surrogate:
     print("training surrogate model")
-    t_start = time.time()
-    print(f"starting time : {time.strftime('%H:%M:%S', time.localtime())}")
-    #optimizer = opt.SGD(surrogate_net.parameters(), lr=0.1, momentum=0.9, weight_decay=0.005, nesterov=True)
+    t_start = get_time()
+    print(f"starting time : {get_time(False)}")
     if schedule_surrogate:
         scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=(n_epochs*0.85), eta_min=0.0001, verbose=True)
+        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=2, threshold=0.001, cooldown=1, verbose=True)
 
     for epoch in range(1, n_epochs):
         dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
                                , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur)
-        data_loader = DataLoader(dataset, batch_size=batchsize_surrogate, shuffle=True, drop_last=True)
+        data_loader = DataLoader(dataset, batch_size=batchsize_surrogate, shuffle=True, drop_last=True, num_workers=0)
         for i, batch in enumerate(data_loader):
             X, y, _ = batch
             loss = surrogate_net.train(optimizer, epoch)
+            if i % 25 == 0:
+                print(f"batch {i} \t loss : {loss:.4f}")
+
         if epoch % 1 == 0:
-            t_end = time.time() - t_start  # training time
-            t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
-            print(f'Epoch : { epoch + 1} \t Loss : {loss:.4f} \t Time :  {t_string}')
+            print(f'Epoch : { epoch + 1} \t Lr : {optimizer.param_groups[0]["lr"]} \t Loss : {loss:.4f} \t Time :  {time_elapsed(t_start)}')
         if epoch in [0,1,2,3,4,5,6,7,8,9] or (epoch % 5 == 0):
             X, y, _ = batch[0:20]
             x_show = X[0:20].cuda()
@@ -833,13 +845,14 @@ if train_surrogate:
             compare_thresholds(x_show, name=f"surrogate_{epoch}", nr=7)
 
         if schedule_surrogate:
-            scheduler.step()
+            print(i, loss)
+            scheduler.step(val_losses)
 
-    print(f"end time : {time.strftime('%H:%M:%S', time.localtime())}")
+    print(f"end time : {get_time(False)}")
     # Save model
     print("saving model")
     if saving:
-        PATH = parameters + t_string + PATH
+        PATH = parameters + str(time_elapsed(t_start)) + PATH
     torch.save(surrogate_net.state_dict(), PATH)
     print("saved model")
     gc.collect()
