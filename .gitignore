@@ -23,3 +23,4 @@ data/mnist/MNIST/raw/t10k-images-idx3-ubyte
 data/mnist/MNIST/raw/t10k-labels-idx1-ubyte
 data/mnist/MNIST/raw/train-images-idx3-ubyte
 data/mnist/MNIST/raw/train-labels-idx1-ubyte
+*.png
