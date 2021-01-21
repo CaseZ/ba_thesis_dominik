@@ -26,7 +26,7 @@ import traceback
 
 # ## temporary ###
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"    # instead conda install nomkl
-# os.environ['CUDA_LAUNCH_BLOCKING'] = "1"       # debug cuda errors
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"       # debug cuda errors
 # ## temporary ###
 
 
@@ -114,7 +114,7 @@ def cuda_np(tensor):
 
 
 def weights_init(m, customgain=True):
-    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+    if isinstance(m, nn.Conv2d): #or isinstance(m, nn.ConvTranspose2d):
         nn.init.xavier_normal_(m.weight.data, gain=(nn.init.calculate_gain('relu') if customgain else 1))
         #nn.init.xavier_normal_(m.bias.data)
 
@@ -189,7 +189,7 @@ def compare_images(x_show, output, showTarget, name, threshs=None, y_show=None, 
     plt.close(fig_i)
 
 
-def compare_thresholds(x_show, name, nr=8):
+def compare_thresholds(x_show, name, nr=8, round=False):
     fig_c, axs = plt.subplots(nr, 3)
 
     a = np.random.randint(0, len(X))
@@ -212,7 +212,7 @@ def compare_thresholds(x_show, name, nr=8):
         x1 = create_threshImage(x1, t1, t2, blur, preprocess=True)
 
         with torch.no_grad():
-            x1 = surrogate_net(x1.unsqueeze(0), rounding=False).squeeze(0)
+            x1 = surrogate_net(x1.unsqueeze(0), rounding=round).squeeze(0)
         x1 = inv_norm(x1)
         x1 = cuda_np(x1[0])
 
@@ -354,8 +354,8 @@ class SurrogateNet(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.deconv2 = nn.Sequential(
-            nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2, padding=0),
-            nn.BatchNorm2d(64),
+            nn.ConvTranspose2d(64, 1, kernel_size=2, stride=2, padding=0),
+            nn.BatchNorm2d(1),
             nn.ReLU(inplace=True),
         )
         # add upsample to ensure always same output
@@ -376,13 +376,13 @@ class SurrogateNet(nn.Module):
         '''
         # same-convolution after upsampling / deconvoluting
         self.sConv1 = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=5, stride=1, padding=2),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(1, 1, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(1),
             nn.ReLU(inplace=True),
         )
 
         self.sConv2 = nn.Sequential(
-            nn.Conv2d(64, 1, kernel_size=5, stride=1, padding=2),
+            nn.Conv2d(1, 1, kernel_size=5, stride=1, padding=2),
             nn.BatchNorm2d(1),
             nn.ReLU(inplace=True),
         )
@@ -707,15 +707,15 @@ duplicates = None   # optional
 topMargin = 400     # threshold value top margin cutoff
 bottomMargin = 150  # threshold value bottom margin cutoff
 blur = 5            # kernel size for cv.GaussianBlur preprocessing when passing to surrogate
-n_epochs = 30       # epochs for training session
-total_eps = 30      # total epochs for saving
+n_epochs = 50       # epochs for training session
+total_eps = 50      # total epochs for saving
 
-lrs = 0.3          # (starting) learning rate surrogate model
+lrs = 0.05          # (starting) learning rate surrogate model
 lrv = 0.1           # (starting) learning rate validation model
 lrp = 0.1           # (starting) learning rate prediction model
 
 # -- surrogate model control--
-batchsize_surrogate = 23        # batchsize for surrogate training
+batchsize_surrogate = 15#23     # batchsize for surrogate training
 train_surrogate = False          # if true loading model otherwise train from scratch
 load_surrogate = True          # continue train when model loaded
 schedule_surrogate = True       # use learning rate scheduler
@@ -729,12 +729,12 @@ schedule_valid = True           # use learning rate scheduler
 
 # -- prediction model control--
 batchsize_predict = 20          # batchsize for predict training
-train_predict = False          # if true loading model otherwise train from scratch
+train_predict = True          # if true loading model otherwise train from scratch
 load_predict = True            # continue train when model loaded
 schedule_predict = True         # use learning rate scheduler
 
 # -- misc --
-shutdown_txt = False            # write stdout to txt and shutdown after training
+shutdown_txt = True            # write stdout to txt and shutdown after training
 saving = False                  # saving model with parameters as name
 printingClasses = False
 normalize = True                # normalizing input to [0,1]
@@ -833,7 +833,7 @@ if train_surrogate:
     print(f"starting time : {get_time(False)}")
     if schedule_surrogate:
         #scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=(n_epochs*0.85), eta_min=0.0001, verbose=True)
-        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=2, threshold=0.001, cooldown=1, verbose=True)
+        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=1, threshold=0.001, cooldown=1, verbose=True)
 
     for epoch in range(1, n_epochs):
         try:
@@ -908,7 +908,8 @@ if viz_surrogate:
 
     compare_images(x_show, output, name="surrogate", showTarget=True, y_show=y_show, nr=int(batchsize_surrogate/2))
 
-    compare_thresholds(x_show, name="surrogate")
+    compare_thresholds(x_show, name="surrogate_rounded", round=True)
+    compare_thresholds(x_show, name="surrogate", round=False)
 
     # visualize last output of network
     '''
@@ -1054,7 +1055,8 @@ if load_predict:
 
 if train_predict:
     print("training prediction model")
-    t = time.time()
+    t_start = get_time()
+    print(f"starting time : {get_time(False)}")
     if schedule_predict:
         scheduler3 = lr_scheduler.CosineAnnealingLR(optimizer3, T_max=(n_epochs*0.85), eta_min=0.001, verbose=True)
 
@@ -1085,9 +1087,7 @@ if train_predict:
                 optimizer3.step()
 
         if epoch % 1 == 0:
-            t_end = time.time() - t  # training time
-            t_string = "" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s"
-            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {t_string} \t sample thresholds : {thresholds}')
+            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {time_elapsed(t_start)} \t sample thresholds : {thresholds}')
 
         if epoch % 1 == 0:
             contour_imgs = [inv_norm(im).int() for im in contour_imgs]
@@ -1103,10 +1103,10 @@ if train_predict:
 
     # Save model
     print("saving prediction model")
+    print(f"end time : {get_time(False)}")
     torch.save(predict_net.state_dict(), "predict_" + PATH)
     print("saved prediction model")
-    t_end = time.time() - t   # training time
-    t_string = "_" + str(int(t_end / 60)) + "m" + str(int(t_end % 60)) + "s_"
+    t_end = time_elapsed(t_start)   # training time
     gc.collect()
     torch.cuda.empty_cache()
     winsound.Beep(500, 1000)
