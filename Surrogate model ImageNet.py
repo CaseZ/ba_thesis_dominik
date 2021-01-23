@@ -770,15 +770,16 @@ viz_surrogate = True            # visualize output of surrogate network
 
 # -- validation model control--
 batchsize_validation = 60       # batchsize for validation training
-train_valid = True             # if true loading model otherwise train from scratch
+train_valid = False             # if true loading model otherwise train from scratch
 load_valid = False              # continue train when model loaded
 schedule_valid = True           # use learning rate scheduler
 
 # -- prediction model control--
 batchsize_predict = 25          # batchsize for predict training
-train_predict = False          # if true loading model otherwise train from scratch
-load_predict = True            # continue train when model loaded
+train_predict = True          # if true loading model otherwise train from scratch
+load_predict = False            # continue train when model loaded
 schedule_predict = True         # use learning rate scheduler
+use_alex = True                 # use alexNet conv layer as validation
 
 # -- misc --
 shutdown_txt = False            # write stdout to txt and shutdown after training
@@ -998,7 +999,7 @@ optimizer2 = opt.AdamW(surrogate_net.parameters(), lr=lrv)
 # opt.SGD(val_net.parameters(), lr=lrv, momentum=0.9, weight_decay=0.005, nesterov=True)
 
 alex_og = tv.models.alexnet(pretrained=True)
-alex = AlexCustom(alex_og, layers=4).cuda()     # 2,5,8,10,13
+alex = AlexCustom(alex_og, layers=5).cuda()     # 2,5,8,10,13
 alex.eval()
 freeze(alex)
 print(alex)
@@ -1143,10 +1144,22 @@ if train_predict:
             X = X.cuda()
             optimizer3.zero_grad()
             output, thresholds, contour_imgs, input_im = predict_net(X)
-            train_loss = criterion(output, y)
-            loss = train_loss.item()
-            train_loss.backward()
-            del train_loss
+
+            if use_alex:
+                output_train2 = alex(output)
+                y_train2 = alex(y)
+
+                # computing the training and validation loss
+                train_loss = criterion(output_train2, y_train2)
+                loss = train_loss.item()
+                train_loss.backward()
+                del train_loss
+            else:
+                train_loss = criterion(output, y)
+                loss = train_loss.item()
+                train_loss.backward()
+                del train_loss
+
 
             #output = torch.tensor([torch.topk(out, 1)[1] for out in output]).float().cuda()  # extract class labels
             #acc = metrics.accuracy_score(cuda_np(output), cuda_np(y))
