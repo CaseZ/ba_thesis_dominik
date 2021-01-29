@@ -93,7 +93,7 @@ def freeze(model):
         param.requires_grad = False  # freeze model
 
 
-def render(net, path, input=[1, 3, 128, 128]):
+def render(net, path, input=[14, 3, 128, 128]):
     transforms = [
         hl.transforms.Fold("Conv > BatchNorm > Relu > MaxPool", "ConvBnReluMaxP", "Convolution with Pooling"),
         hl.transforms.Fold("ConvTranspose > BatchNorm > Relu", "ConvTransBnRelu", "Transposed Convolution"),
@@ -166,6 +166,7 @@ def deconstruct_input(input, index=None, img=True):
         return image, t1, t2
     return t1, t2
 
+
 def compare_images(x_show, output, showTarget, name, threshs=None, y_show=None, nr=6):
 
     dim = 3 if showTarget else 2
@@ -179,16 +180,22 @@ def compare_images(x_show, output, showTarget, name, threshs=None, y_show=None, 
 
         ax[0].axis('off'), ax[1].axis('off')
         ax[0].imshow(x0, cmap=plt.get_cmap('gray'), interpolation='nearest')
-        ax[0].set_title(f'{str(t1)} and {str(t2)}')
+        ax[0].set_title(f'({str(t1)}, {str(t2)})')
         ax[1].imshow(im, cmap=plt.get_cmap('gray'), interpolation='nearest')
 
         # set column header
-        if a == 0:
-            ax[1].set_title('output')
+        #if a == 0:
+        #    ax[1].set_title('output')
 
         if showTarget:
+            if y_show is None:
+                if a == 0:
+                    print("creating canny image")
+                y0 = torch.tensor(cv.Canny(im.astype(np.uint8), t1, t2).astype(float))
+            else:
+                y0 = (cuda_np(y_show[a])).astype(np.uint8)
+
             ax[2].axis('off')
-            y0 = (cuda_np(y_show[a])).astype(np.uint8)
             #err = metrics.mean_squared_error(im, y0)/255
             #IQ1 = piq.ssim((output[a][0]).type(torch.FloatTensor), y_show[a].type(torch.FloatTensor), data_range=1.)
             #IQ2 = piq.gmsd((output[a][0]).type(torch.FloatTensor), y_show[a].type(torch.FloatTensor), data_range=1.)
@@ -233,7 +240,7 @@ def compare_thresholds(x_show, name, nr=8, round=False):
 
         ax[0].axis('off'), ax[1].axis('off'), ax[2].axis('off')
         ax[0].imshow(x0, cmap=plt.get_cmap('gray'), interpolation='nearest')
-        # ax[0].set_title(str(t1) + '   and   ' + str(t2))
+        # ax[0].set_title(f'({str(t1)}, {str(t2)})')
 
         ax[1].imshow(x1, cmap=plt.get_cmap('gray'), interpolation='nearest')
         ax[2].imshow(y0, cmap=plt.get_cmap('gray'), interpolation='nearest')
@@ -529,7 +536,7 @@ class PredictNet(nn.Module):
             #freeze(validate)
             self.validate = validate
 
-    def forward(self, h):
+    def forward(self, h, outputs=False):
         og_im = h           # save original input image
 
         h = self.conv1(h)
@@ -550,7 +557,9 @@ class PredictNet(nn.Module):
 
         classes = self.validate(contour_im)     # validation pass
 
-        return classes, threshs, contour_im, h_3
+        if outputs:
+            return classes, threshs, contour_im, h_3
+        return classes
 
 
 class Decoder(nn.Module):
@@ -775,11 +784,12 @@ load_valid = False              # continue train when model loaded
 schedule_valid = True           # use learning rate scheduler
 
 # -- prediction model control--
-batchsize_predict = 25          # batchsize for predict training
-train_predict = True          # if true loading model otherwise train from scratch
-load_predict = False            # continue train when model loaded
+batchsize_predict = 14          # batchsize for predict training
+train_predict = False          # if true loading model otherwise train from scratch
+load_predict = True            # continue train when model loaded
 schedule_predict = True         # use learning rate scheduler
 use_alex = True                 # use alexNet conv layer as validation
+viz_predict = True            # visualize output of predict network
 
 # -- misc --
 shutdown_txt = False            # write stdout to txt and shutdown after training
@@ -858,7 +868,7 @@ surrogate_net.apply(weights_init)  # xavier init for conv2d layer weights
 
 # visualizing architecture
 #print(summary(surrogate_net, (3, 218, 178), batch_size=14, device='cuda'))
-#render(surrogate_net, path='data/surrogate_minimal')
+#render(surrogate_net, path='data/surrogate_full')
 '''
 try:
         return input(prompt)
@@ -1118,7 +1128,7 @@ predict_net.validate = val_net
 
 #print(predict_net)
 #print(summary(predict_net, (1, 218, 218), batch_size=14, device='cuda'))
-#render(predict_net, path='data/predict_minimal', input=[1, 1, 128, 128])
+#render(predict_net, path='data/predict_full', input=[14, 1, 128, 128])
 
 if load_predict:
     # Load model
@@ -1143,7 +1153,7 @@ if train_predict:
             y = X.narrow(1, 0, 1).cuda() #.squeeze()
             X = X.cuda()
             optimizer3.zero_grad()
-            output, thresholds, contour_imgs, input_im = predict_net(X)
+            output, thresholds, contour_imgs, input_im = predict_net.forward(X, outputs=True)
 
             if use_alex:
                 output_train2 = alex(output)
@@ -1171,14 +1181,12 @@ if train_predict:
                 optimizer3.step()
 
         if epoch % 1 == 0:
-            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Accuracy :  {acc:.4f} \t Time :  {time_elapsed(t_start)} \t sample thresholds : {thresholds}')
+            print(f'Epoch : {epoch + 1} \t Loss : {loss:.4f} \t Time :  {time_elapsed(t_start)} \t sample thresholds : {thresholds}')
 
         if epoch % 1 == 0:
             contour_imgs = [inv_norm(im).int() for im in contour_imgs]
             input_im = [inv_input_norm(og).int() for og in input_im]
-
-
-            compare_images(input_im, contour_imgs, name=f"predict{epoch+1}_", threshs=thresholds, showTarget=False, nr=int(batchsize_predict/3))
+            compare_images(input_im, contour_imgs, name=f"predict{epoch+1}_", threshs=thresholds, showTarget=True, nr=4)
 
         scheduler3.step()
         #print(f"output : {cuda_np(output).astype(np.int)}")
@@ -1209,6 +1217,26 @@ if train_predict:
     axs[1].legend()
     saveimg("predictmodel_loss_", show)
 
+
+# ----------- VISUALIZING -----------
+if viz_predict:
+    dataset = CannyDataset(ImageNet_data, topMargin=topMargin, bottomMargin=bottomMargin
+                           , normalize=normalize, norm=norm, tnorm=tnorm, blur=blur, noThresholds=True)
+    data_loader = DataLoader(dataset, batch_size=batchsize_predict, shuffle=True, drop_last=True)
+    print("visualizing predict output")
+    batch = next(iter(data_loader))
+    X, _, _ = batch
+    # surrogate is input, normal image is target
+    y = X.narrow(1, 0, 1).cuda()  # .squeeze()
+    X = X.cuda()
+
+    with torch.no_grad():
+        output, thresholds, contour_imgs, input_im = predict_net.forward(X, outputs=True)
+
+    # invert normalization
+    contour_imgs = [inv_norm(im).int() for im in contour_imgs]
+    input_im = [inv_input_norm(og).int() for og in input_im]
+    compare_images(input_im, contour_imgs, name=f"predict_", threshs=thresholds, showTarget=True, nr=4)
 
 
 # save console to txt and shutdown
